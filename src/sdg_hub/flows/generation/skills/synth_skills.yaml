@@ -2,7 +2,7 @@
   block_config:
     block_name: gen_questions
     config_path: configs/skills/freeform_questions.yaml
-    model_id: mistralai/Mixtral-8x7B-Instruct-v0.1
+    model_id: meta-llama/Llama-3.3-70B-Instruct
     output_cols:
       - question
     batch_kwargs:
@@ -13,7 +13,7 @@
   block_config:
     block_name: eval_questions
     config_path: configs/skills/evaluate_freeform_questions.yaml
-    model_id: mistralai/Mixtral-8x7B-Instruct-v0.1
+    model_id: meta-llama/Llama-3.3-70B-Instruct
     output_cols:
       - evaluation
       - score
@@ -34,14 +34,14 @@
   block_config:
     block_name: gen_responses
     config_path: configs/skills/freeform_responses.yaml
-    model_id: mistralai/Mixtral-8x7B-Instruct-v0.1
+    model_id: meta-llama/Llama-3.3-70B-Instruct
     output_cols:
       - response
 - block_type: LLMBlock
   block_config:
     block_name: evaluate_qa_pair
     config_path: configs/skills/evaluate_freeform_pair.yaml
-    model_id: mistralai/Mixtral-8x7B-Instruct-v0.1
+    model_id: meta-llama/Llama-3.3-70B-Instruct
     output_cols:
       - evaluation
       - score
