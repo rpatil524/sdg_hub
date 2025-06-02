@@ -3,18 +3,16 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List
 import traceback
-import uuid
 
 # Third Party
-from datasets import Dataset, load_dataset
-from datasets.data_files import EmptyDatasetError
+from datasets import Dataset
 from tqdm import tqdm
 
 # Local
 from .logger_config import setup_logger
 from .pipeline import Pipeline
 from .utils.datautils import safe_concatenate_datasets
-
+from .checkpointer import Checkpointer
 
 logger = setup_logger(__name__)
 
@@ -40,36 +38,6 @@ class SDG:
 
         return batches
 
-    def _get_missing_data(self, seed_data, generated_data):
-        # Get the common columns between the two datasets
-        common_columns = list(
-            set(seed_data.column_names) & set(generated_data.column_names)
-        )
-
-        # Extract the relevant data based on common columns
-        seed_data_common = seed_data.select_columns(common_columns)
-        generated_data_common = generated_data.select_columns(common_columns)
-
-        # Convert to Pandas DataFrames for easier comparison
-        seed_df = seed_data_common.to_pandas()
-        generated_df = generated_data_common.to_pandas()
-
-        # Identify missing rows
-        missing_df = seed_df[
-            ~seed_df.apply(tuple, 1).isin(generated_df.apply(tuple, 1))
-        ]
-
-        # Convert back to Dataset
-        missing_data = Dataset.from_pandas(missing_df, preserve_index=False)
-
-        return missing_data
-
-    def _save_intermediate_checkpoint(self, dataset, checkpoint_dir):
-        checkpoint_id = uuid.uuid4().hex
-        checkpoint_file = f"{checkpoint_dir}/data_checkpoint_{checkpoint_id}.jsonl"
-        logger.info(f"Saving checkpoint to {checkpoint_file}")
-        dataset.to_json(checkpoint_file, orient="records", lines=True)
-
     @staticmethod
     def _generate_data(pipelines, input_split, ds, i=None):
         logger.info(f"Processing split {i}")
@@ -84,33 +52,15 @@ class SDG:
             return None
 
     def generate(self, dataset: Dataset, checkpoint_dir=None) -> Dataset:
-        # check if checkpoint_dir exists
-        pre_generated_data = []
-        if checkpoint_dir is not None:
-            try:
-                # check if there are any existing checkpoints
-                pre_generated_data = load_dataset(
-                    "json", data_dir=checkpoint_dir, split="train"
-                )
-                logger.info(
-                    f"Loading existing checkpoints from {checkpoint_dir}, with {pre_generated_data.num_rows} rows"
-                )
-                seed_data = self._get_missing_data(dataset, pre_generated_data)
-                if seed_data.num_rows == 0:
-                    logger.info(
-                        f"All seed data has been generated, no missing rows found, returning data from {checkpoint_dir}"
-                    )
-                    return pre_generated_data
-                logger.info(f"Found {seed_data.num_rows} missing rows in the dataset")
-
-            except EmptyDatasetError:
-                logger.info(
-                    f"No existing checkpoints found in {checkpoint_dir}, generating from scratch"
-                )
-                seed_data = dataset
-
-        else:
-            seed_data = dataset
+        # Initialize checkpointer
+        checkpointer = Checkpointer(checkpoint_dir, self.save_freq)
+        
+        # Load existing checkpoints and determine missing data
+        seed_data, pre_generated_data = checkpointer.load_existing_data(dataset)
+        
+        # If all data has been generated, return the pre-generated data
+        if seed_data.num_rows == 0 and pre_generated_data is not None:
+            return pre_generated_data
 
         if not self.batch_size:
             # If batch size is not provided, generate the dataset in a single pass
@@ -121,13 +71,10 @@ class SDG:
             return generated_dataset
         
         logger.info("Splitting the dataset into smaller batches")
-        input_splits = (
-            self._split_dataset(seed_data, self.batch_size)
-            if self.batch_size
-            else [seed_data]
-        )
+        input_splits = self._split_dataset(seed_data, self.batch_size)
         logger.info(
-            f"Generating dataset with {len(input_splits)} splits, batch size {self.batch_size}, and {self.num_workers} workers"
+            f"Generating dataset with {len(input_splits)} splits, "
+            f"batch size {self.batch_size}, and {self.num_workers} workers"
         )
 
         generated_data = [pre_generated_data] if pre_generated_data else []
@@ -147,16 +94,15 @@ class SDG:
                 if generated_data_split:
                     generated_data.append(generated_data_split)
                     logger.info(f"Finished future processing split {i} \n\n")
-                    if self.save_freq and (i + 1) % self.save_freq == 0:
+                    
+                    # Use checkpointer to handle intermediate saves
+                    if checkpointer.should_save_checkpoint(i):
                         # Save only the new splits since the last checkpoint
                         new_splits = generated_data[last_saved_split_index : i + 1]
                         checkpoint_dataset = safe_concatenate_datasets(new_splits)
                         # check if checkpoint_dataset is not None
                         if checkpoint_dataset:
-                            self._save_intermediate_checkpoint(
-                                checkpoint_dataset, checkpoint_dir
-                            )
-
+                            checkpointer.save_intermediate_checkpoint(checkpoint_dataset)
                             last_saved_split_index = i + 1
 
         generated_dataset = safe_concatenate_datasets(generated_data)
