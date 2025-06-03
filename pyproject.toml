@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [build-system]
-requires = ["setuptools>=64", "setuptools_scm>=8"]
+requires = ["setuptools>=64", "setuptools_scm>=8", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -28,7 +28,18 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: Implementation :: CPython",
 ]
-dynamic = ["dependencies", "optional-dependencies", "version"]
+# Core dependencies moved from requirements.txt
+dependencies = [
+    "click>=8.1.7,<9.0.0",
+    "datasets>=2.18.0,<4.0.0",
+    "httpx>=0.25.0,<1.0.0",
+    "jinja2",
+    "openai>=1.13.3,<2.0.0",
+    "rich",
+    "tenacity>=8.3.0,!=8.4.0",
+    "tqdm>=4.66.2,<5.0.0",
+]
+dynamic = ["version"]
 
 [project.scripts]
 
@@ -37,6 +48,34 @@ homepage = "https://ai-innovation.team/"
 source = "https://github.com/Red-Hat-AI-Innovation-Team/sdg_hub"
 issues = "https://github.com/Red-Hat-AI-Innovation-Team/sdg_hub/issues"
 
+[project.optional-dependencies]
+gui = [
+    "flask>=3.0.2",
+    "pyyaml>=6.0.1",
+]
+vllm = [
+    "vllm>=0.3.0,<0.8.4",
+    "torch>=2.0.0",
+    "transformers>=4.37.0",
+    "accelerate>=0.21.0",
+    "xformers>=0.0.22.post7",
+]
+examples = [
+    "tabulate>=0.9.0",
+    "transformers>=4.37.0",
+    "langchain-text-splitters",
+]
+dev = [
+    "pre-commit>=3.0.4,<4.0",
+    "pylint>=2.16.2,<4.0",
+    "pylint-pydantic",
+    "pytest",
+    "pytest-asyncio",
+    "pytest-cov",
+    "pytest-html",
+    "tox>=4.4.2,<5",
+]
+
 [tool.setuptools_scm]
 version_file = "src/sdg_hub/_version.py"
 # do not include +gREV local version, required for Test PyPI upload
@@ -44,9 +83,6 @@ local_scheme = "no-local-version"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-
-[tool.setuptools.dynamic]
-dependencies = {file = ["requirements.txt"]}
 
 [tool.setuptools.packages.find]
 where = ["src"]
