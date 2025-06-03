@@ -1,21 +1,235 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Standard
-from pathlib import Path
 import json
+import random
+import uuid
+import os
+import yaml
+from pathlib import Path
+from typing import List
+import re
 
 # Third Party
 from datasets import Dataset
 from tabulate import tabulate
 from transformers import AutoTokenizer
-import yaml
-
-# First Party
-from sdg_hub.logger_config import setup_logger
+from langchain_text_splitters import Language, RecursiveCharacterTextSplitter
 
 # Local
-from .datautils import safe_concatenate_datasets
-from .chunking import chunk_document
+import sdg_hub
+from sdg_hub.logger_config import setup_logger
+from sdg_hub.utils.datautils import safe_concatenate_datasets
 
 logger = setup_logger(__name__)
+_DEFAULT_CHUNK_OVERLAP = 100
+
+
+def create_auxiliary_dataset(generated_dataset: Dataset):
+    if "dataset_type" not in generated_dataset.column_names:
+        return None
+
+    aux_inst_path = os.path.join(
+        os.path.dirname(sdg_hub.__file__),
+        "configs/knowledge/auxilary_instructions.yaml",
+    )
+    print(aux_inst_path)
+
+    if os.path.isfile(aux_inst_path):
+        with open(aux_inst_path, "r", encoding="utf-8") as fp:
+            auxiliary_inst = yaml.safe_load(fp)
+    else:
+        logger.error(f"auxiliary instructions file not found at {aux_inst_path}")
+        return None
+    auxiliary_ds = generated_dataset.filter(
+        lambda x: x["dataset_type"] != "base_document"
+    )
+    unique_document_auxiliary = auxiliary_ds.to_pandas().drop_duplicates(
+        subset=["document"]
+    )
+    unique_document_auxiliary = Dataset.from_pandas(unique_document_auxiliary)
+    unique_document_auxiliary = unique_document_auxiliary.remove_columns(
+        [
+            col
+            for col in unique_document_auxiliary.column_names
+            if col
+            not in [
+                "raw_document",
+                "document_outline",
+                "domain",
+                "dataset_type",
+                "document",
+            ]
+        ]
+    )
+    unique_document_auxiliary = unique_document_auxiliary.rename_columns(
+        {"raw_document": "context", "document": "response"}
+    )
+
+    def __create_auxiliary_ds(rec):
+        instruction = random.choice(auxiliary_inst[rec["dataset_type"]])
+        messages = [
+            {"role": "user", "content": f"{rec['context']}\n\n{instruction}"},
+            {"role": "assistant", "content": rec["response"]},
+        ]
+        metadata = json.dumps(
+            {
+                "dataset_type": rec["dataset_type"],
+                "raw_document": rec["context"],
+                "dataset": f"document_{rec['dataset_type']}",
+                "domain": rec["domain"],
+            }
+        )
+        return {"messages": messages, "metadata": metadata, "id": str(uuid.uuid4())}
+
+    unique_document_auxiliary = unique_document_auxiliary.map(
+        __create_auxiliary_ds, remove_columns=unique_document_auxiliary.column_names
+    )
+    return unique_document_auxiliary
+
+
+def _conv_pretrain(rec):
+    rec["messages"] = [
+        {
+            "role": "pretraining",
+            "content": f"<|user|>\n{rec['messages'][0]['content']}\n<|assistant|>\n{rec['messages'][1]['content']}",
+        }
+    ]
+    return rec
+
+
+def generate_knowledge_qa_dataset(
+    generated_dataset: Dataset, keep_context_separate=False, keep_document_outline=False
+):
+    def __create_qa_row(rec):
+        context = rec["document"]
+        instruction = rec["question"]
+        response = rec["response"]
+        metadata = {
+            "sdg_document": rec["document"],
+            "domain": rec["domain"],
+            "dataset": "document_knowledge_qa",
+        }
+        if "raw_document" in rec and "dataset_type" in rec:
+            metadata.update(
+                {
+                    "raw_document": rec["raw_document"],
+                    "dataset_type": rec["dataset_type"],
+                }
+            )
+        metadata = json.dumps(metadata)
+        if keep_context_separate:
+            messages = [
+                {"role": "user", "content": f"{instruction}"},
+                {"role": "assistant", "content": response},
+            ]
+            return {
+                "messages": messages,
+                "metadata": metadata,
+                "id": str(uuid.uuid4()),
+                "context": context,
+            }
+        else:
+            if keep_document_outline:
+                messages = [
+                    {
+                        "role": "user",
+                        "content": f"{rec['document_outline']}\n{context}\n\n{instruction}",
+                    },
+                    {"role": "assistant", "content": response},
+                ]
+            else:
+                messages = [
+                    {"role": "user", "content": f"{context}\n\n{instruction}"},
+                    {"role": "assistant", "content": response},
+                ]
+            return {"messages": messages, "metadata": metadata, "id": str(uuid.uuid4())}
+
+    knowledge_ds = generated_dataset.map(
+        __create_qa_row, remove_columns=generated_dataset.column_names
+    )
+    return knowledge_ds
+
+
+def build_raft_dataset(ds: Dataset, p, num_doc_in_context=4):
+    all_context = list(set(ds["context"]))
+
+    def _pick_documents(rec, p):
+        answer_document = rec["context"]
+        selected_docs = [e for e in all_context if e != answer_document]
+        if len(selected_docs) > 0:
+            if len(selected_docs) < num_doc_in_context:
+                logger.info(
+                    f"Number of unique document is {len(selected_docs)} which is less than {num_doc_in_context}. Using all the documents in the RAFT context"
+                )
+            if random.uniform(0, 1) < p:
+                # golden/answer + distractor documents
+                docs = (
+                    random.sample(selected_docs, k=num_doc_in_context - 1)
+                    + [answer_document]
+                    if len(selected_docs) >= (num_doc_in_context - 1)
+                    else selected_docs + [answer_document]
+                )
+            else:
+                # distractor documents
+                docs = (
+                    random.sample(selected_docs, k=num_doc_in_context)
+                    if len(selected_docs) >= num_doc_in_context
+                    else selected_docs
+                )
+        else:
+            logger.info("Only 1 unique document found. Turning off RAFT styling")
+            docs = [answer_document]
+
+        random.shuffle(docs)
+
+        docs = "\n".join(([f"Document:\n{e}\n\n" for idx, e in enumerate(docs)]))
+        user_idx, user_msg = [
+            (idx, rec_msg)
+            for idx, rec_msg in enumerate(rec["messages"])
+            if rec_msg["role"] == "user"
+        ][0]
+        user_inst = user_msg["content"]
+        rec["messages"][user_idx]["content"] = f"{docs}\n\n{user_inst}"
+        rec["messages"] = rec["messages"]
+        metadata = json.loads(rec["metadata"])
+        metadata["dataset"] += f"_raft_p{p}"
+        rec["metadata"] = json.dumps(metadata)
+        return rec
+
+    ds = ds.map(_pick_documents, fn_kwargs={"p": p}, remove_columns=["context"])
+    return ds
+
+
+def create_knowledge_regular_ds(generated_dataset: Dataset):
+    # Phase 1.0
+    knowledge_ds = generate_knowledge_qa_dataset(
+        generated_dataset, keep_context_separate=True
+    )
+    knowledge_ds = build_raft_dataset(knowledge_ds, p=0.4)
+
+    auxiliary_dataset = create_auxiliary_dataset(generated_dataset)
+    if auxiliary_dataset is not None:
+        transformed_data = safe_concatenate_datasets([knowledge_ds, auxiliary_dataset])
+    else:
+        transformed_data = knowledge_ds
+    return transformed_data
+
+
+def create_knowledge_pretraining_ds(generated_dataset: Dataset):
+    # Phase 0.7
+    knowledge_ds = generate_knowledge_qa_dataset(
+        generated_dataset, keep_context_separate=False
+    )
+    knowledge_ds = knowledge_ds.map(_conv_pretrain)
+
+    auxiliary_dataset = create_auxiliary_dataset(generated_dataset)
+    if auxiliary_dataset is not None:
+        auxiliary_dataset = auxiliary_dataset.map(_conv_pretrain)
+        transformed_data = safe_concatenate_datasets([knowledge_ds, auxiliary_dataset])
+    else:
+        transformed_data = knowledge_ds
+    return transformed_data
 
 
 def fuse_texts(text_list, short_length_threshold=100):
@@ -212,6 +426,66 @@ def build_chunks_from_docling_json(
     return document_chunks
 
 
+def _num_tokens_from_words(num_words) -> int:
+    return int(num_words * 1.3)  # 1 word ~ 1.3 token
+
+
+def _num_chars_from_tokens(num_tokens) -> int:
+    return int(num_tokens * 4)  # 1 token ~ 4 English character
+
+
+def chunk_document(documents: List, server_ctx_size, chunk_word_count) -> List[str]:
+    """
+    Iterates over the documents and splits them into chunks based on the word count provided by the user.
+    Args:
+        documents (list): List of documents retrieved from git (can also consist of a single document).
+        server_ctx_size (int): Context window size of server.
+        chunk_word_count (int): Maximum number of words to chunk a document.
+    Returns:
+         List[str]: List of chunked documents.
+    """
+
+    # Checks for input type error
+    if isinstance(documents, str):
+        documents = [documents]
+
+    elif not isinstance(documents, list):
+        raise TypeError(
+            "Expected: documents to be a list, but got {}".format(type(documents))
+        )
+
+    no_tokens_per_doc = _num_tokens_from_words(chunk_word_count)
+    if no_tokens_per_doc > int(server_ctx_size - 1024):
+        raise ValueError(
+            "Error: {}".format(
+                str(
+                    f"Given word count ({chunk_word_count}) per doc will exceed the server context window size ({server_ctx_size})"
+                )
+            )
+        )
+    # Placeholder for params
+    content = []
+    chunk_size = _num_chars_from_tokens(no_tokens_per_doc)
+    chunk_overlap = _DEFAULT_CHUNK_OVERLAP
+
+    # Using Markdown as default, document-specific chunking will be implemented in seperate pr.
+    text_splitter = RecursiveCharacterTextSplitter.from_language(
+        language=Language.MARKDOWN,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+    )
+
+    # Determine file type for heuristics, default with markdown
+    for docs in documents:
+        # Use regex to remove unnecessary dashes in front of pipe characters in a markdown table.
+        docs = re.sub(r"-{2,}\|", "-|", docs)
+        # Remove unnecessary spaces in front of pipe characters in a markdown table.
+        docs = re.sub(r"\  +\|", " |", docs)
+        temp = text_splitter.create_documents([docs])
+        content.extend([item.page_content for item in temp])
+    return content
+
+
 class DocProcessor:
     def __init__(
         self,
@@ -231,7 +505,9 @@ class DocProcessor:
         Validate the path and return a Path object.
         Args:
             path (str): Path to be validated.
-        Returns:
+
+        Returns
+        -------
             Path`: Path object.
         """
         if isinstance(path, str):
@@ -245,7 +521,9 @@ class DocProcessor:
         Load the user config file.
         Args:
             user_config_path (Path): Path to the user config file.
-        Returns:
+
+        Returns
+        -------
             dict: User config dictionary.
         """
         # load user config as yaml
@@ -257,7 +535,9 @@ class DocProcessor:
         Process the parsed docling json file and return a dataset.
         Args:
             json_fp (str): Path to the parsed docling json file.
-        Returns:
+
+        Returns
+        -------
             Dataset: Dataset object.
         """
         logger.info(f"Processing parsed docling json file: {json_fp}")
@@ -286,7 +566,9 @@ class DocProcessor:
         Add the ICLS label to the dataset.
         Args:
             dataset (Dataset): Dataset object.
-        Returns:
+
+        Returns
+        -------
             Dataset: Dataset object with ICLS label.
         """
         icl = self.user_config["seed_examples"]
@@ -331,7 +613,9 @@ class DocProcessor:
     def get_processed_dataset(self) -> Dataset:
         """
         Process all the parsed docling json files and return a dataset.
-        Returns:
+
+        Returns
+        -------
             Dataset: Dataset object.
         """
         datasets = []
@@ -340,18 +624,20 @@ class DocProcessor:
             chunk_ds_with_icls = self._add_icls(chunk_ds)
             datasets.append(chunk_ds_with_icls)
         return safe_concatenate_datasets(datasets)
-    
+
     def get_processed_markdown_dataset(self, list_md_files: list[Path]) -> Dataset:
         chunks_mds = []
         for md_file in list_md_files:
             with open(md_file, "r", encoding="utf-8") as f:
                 text = f.read()
-                chunks_mds.append({
-            "document": text,
-            "document_outline": self.user_config["document_outline"],
-            "document_title": md_file,
-            "domain": self.user_config["domain"],
-            })
+                chunks_mds.append(
+                    {
+                        "document": text,
+                        "document_outline": self.user_config["document_outline"],
+                        "document_title": md_file,
+                        "domain": self.user_config["domain"],
+                    }
+                )
         chunk_ds = Dataset.from_list(chunks_mds)
         chunk_ds_with_icls = self._add_icls(chunk_ds)
         return chunk_ds_with_icls

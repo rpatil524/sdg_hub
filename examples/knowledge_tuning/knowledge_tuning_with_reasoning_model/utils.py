@@ -1,13 +1,17 @@
-from sdg_hub.utils.parse_and_convert import (
-    create_auxiliary_dataset,
-    generate_knowledge_qa_dataset
-)
 from datasets import concatenate_datasets
 from sdg_hub.prompts import PromptRegistry
 from sdg_hub.blocks import BlockRegistry, Block
 from datasets import Dataset
 import re
 from typing import List
+
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from knowledge_utils import (
+    create_auxiliary_dataset,
+    generate_knowledge_qa_dataset
+)
 
 def _conv_pretrain(rec, tokenizer):
     if tokenizer is not None:
