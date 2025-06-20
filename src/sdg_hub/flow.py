@@ -27,6 +27,7 @@ import os
 # Third Party
 from datasets import Dataset
 from datasets.data_files import EmptyDatasetError
+from jinja2 import Environment, meta
 from rich.console import Console
 from rich.table import Table
 import yaml
@@ -40,6 +41,7 @@ from .utils.config_validation import validate_prompt_config_schema
 from .utils.validation_result import ValidationResult
 
 logger = setup_logger(__name__)
+
 
 OPERATOR_MAP: Dict[str, Callable] = {
     "operator.eq": operator.eq,
@@ -403,3 +405,70 @@ class Flow(ABC):
             raise ValueError("Invalid config files:\n\n".join(result.errors))
 
         return self
+
+    def validate_flow(self, dataset: Dataset) -> "ValidationResult":
+        """
+        Validate that all required dataset columns are present before executing the flow.
+
+        This includes:
+        - Columns referenced in Jinja templates for LLM blocks
+        - Columns required by specific utility blocks (e.g. filter_column, choice_col, etc.)
+
+        Parameters
+        ----------
+        dataset : Dataset
+            The input dataset to validate against.
+
+        Returns
+        -------
+        ValidationResult
+            Whether the dataset has all required columns, and which ones are missing.
+        """
+        errors = []
+        all_columns = set(dataset.column_names)
+
+        for i, block in enumerate(self.chained_blocks or []):
+            name = block["block_config"].get("block_name", f"block_{i}")
+            block_type = block["block_type"]
+            config = block["block_config"]
+
+            # LLM Block: parse Jinja vars
+            cls_name = block_type.__name__ if isinstance(block_type, type) else block_type.__class__.__name__
+            logger.info(f"Validating block: {name} ({cls_name})")
+            if "LLM" in cls_name:
+                config_path = config.get("config_path")
+                if config_path and os.path.isfile(config_path):
+                    with open(config_path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                        env = Environment()
+                        ast = env.parse(content)
+                        vars_found = meta.find_undeclared_variables(ast)
+                        for var in vars_found:
+                            if var not in all_columns:
+                                errors.append(f"[{name}] Missing column for prompt var: '{var}'")
+
+            # FilterByValueBlock
+            if "FilterByValueBlock" in str(block_type):
+                col = config.get("filter_column")
+                if col and col not in all_columns:
+                    errors.append(f"[{name}] Missing filter_column: '{col}'")
+
+            # SelectorBlock
+            if "SelectorBlock" in str(block_type):
+                col = config.get("choice_col")
+                if col and col not in all_columns:
+                    errors.append(f"[{name}] Missing choice_col: '{col}'")
+
+                choice_map = config.get("choice_map", {})
+                for col in choice_map.values():
+                    if col not in all_columns:
+                        errors.append(f"[{name}] choice_map references missing column: '{col}'")
+
+            # CombineColumnsBlock
+            if "CombineColumnsBlock" in str(block_type):
+                cols = config.get("columns", [])
+                for col in cols:
+                    if col not in all_columns:
+                        errors.append(f"[{name}] CombineColumnsBlock requires column: '{col}'")
+
+        return ValidationResult(valid=(len(errors) == 0), errors=errors)
