@@ -12,6 +12,7 @@ import click
 from sdg_hub.flow import Flow
 from sdg_hub.logger_config import setup_logger
 from sdg_hub.sdg import SDG
+from sdg_hub.utils.path_resolution import resolve_path
 
 
 logger = setup_logger(__name__)
@@ -79,6 +80,8 @@ def run_flow(
         base_url=openai_api_base,
     )
 
+    # Resolve the flow path and check if it exists
+    flow_path = resolve_path(flow_path, ".")
     if not os.path.exists(flow_path):
         raise FileNotFoundError(f"Flow file not found: {flow_path}")
 
@@ -92,7 +95,9 @@ def run_flow(
 
     generated_data = sdg.generate(ds, checkpoint_dir=checkpoint_dir)
     if dataset_end_index is not None and dataset_start_index is not None:
-        save_path = save_path.replace(".jsonl", f"_{dataset_start_index}_{dataset_end_index}.jsonl")
+        save_path = save_path.replace(
+            ".jsonl", f"_{dataset_start_index}_{dataset_end_index}.jsonl"
+        )
     generated_data.to_json(save_path, orient="records", lines=True)
     logger.info(f"Data saved to {save_path}")
 
@@ -154,8 +159,12 @@ def run_flow(
     is_flag=True,
     help="Enable debug mode with a smaller dataset subset.",
 )
-@click.option("--dataset_start_index", type=int, default=0, help="Start index of the dataset.")
-@click.option("--dataset_end_index", type=int, default=None, help="End index of the dataset.")
+@click.option(
+    "--dataset_start_index", type=int, default=0, help="Start index of the dataset."
+)
+@click.option(
+    "--dataset_end_index", type=int, default=None, help="End index of the dataset."
+)
 def main(
     ds_path: str,
     bs: int,

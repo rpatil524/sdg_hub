@@ -38,6 +38,7 @@ from .logger_config import setup_logger
 from .prompts import *  # needed to register prompts
 from .registry import BlockRegistry, PromptRegistry
 from .utils.config_validation import validate_prompt_config_schema
+from .utils.path_resolution import resolve_path
 from .utils.validation_result import ValidationResult
 
 logger = setup_logger(__name__)
@@ -141,15 +142,7 @@ class Flow(ABC):
         str
             Selected file path.
         """
-        if os.path.isabs(filename):
-            return filename
-        for d in dirs:
-            full_file_path = os.path.join(d, filename)
-            if os.path.isfile(full_file_path):
-                return full_file_path
-        # If not found above then return the path unchanged i.e.
-        # assume the path is relative to the current directory
-        return filename
+        return resolve_path(filename, dirs)
 
     def _drop_duplicates(self, dataset: Dataset, cols: List[str]) -> Dataset:
         """Drop duplicates from the dataset based on the columns provided.
@@ -273,7 +266,9 @@ class Flow(ABC):
                 try:
                     with open(path, "r", encoding="utf-8") as f:
                         config_data = yaml.safe_load(f)
-                        _, validation_errors = validate_prompt_config_schema(config_data, path)
+                        _, validation_errors = validate_prompt_config_schema(
+                            config_data, path
+                        )
 
                         if validation_errors:
                             errors.extend(validation_errors)
@@ -320,9 +315,7 @@ class Flow(ABC):
         KeyError
             If a required block or prompt is not found in the registry.
         """
-        yaml_path_relative_to_base = os.path.join(self.base_path, yaml_path)
-        if os.path.isfile(yaml_path_relative_to_base):
-            yaml_path = yaml_path_relative_to_base
+        yaml_path = resolve_path(yaml_path, self.base_path)
         yaml_dir = os.path.dirname(yaml_path)
 
         try:
@@ -433,7 +426,11 @@ class Flow(ABC):
             config = block["block_config"]
 
             # LLM Block: parse Jinja vars
-            cls_name = block_type.__name__ if isinstance(block_type, type) else block_type.__class__.__name__
+            cls_name = (
+                block_type.__name__
+                if isinstance(block_type, type)
+                else block_type.__class__.__name__
+            )
             logger.info(f"Validating block: {name} ({cls_name})")
             if "LLM" in cls_name:
                 config_path = config.get("config_path")
@@ -445,7 +442,9 @@ class Flow(ABC):
                         vars_found = meta.find_undeclared_variables(ast)
                         for var in vars_found:
                             if var not in all_columns:
-                                errors.append(f"[{name}] Missing column for prompt var: '{var}'")
+                                errors.append(
+                                    f"[{name}] Missing column for prompt var: '{var}'"
+                                )
 
             # FilterByValueBlock
             if "FilterByValueBlock" in str(block_type):
@@ -462,13 +461,17 @@ class Flow(ABC):
                 choice_map = config.get("choice_map", {})
                 for col in choice_map.values():
                     if col not in all_columns:
-                        errors.append(f"[{name}] choice_map references missing column: '{col}'")
+                        errors.append(
+                            f"[{name}] choice_map references missing column: '{col}'"
+                        )
 
             # CombineColumnsBlock
             if "CombineColumnsBlock" in str(block_type):
                 cols = config.get("columns", [])
                 for col in cols:
                     if col not in all_columns:
-                        errors.append(f"[{name}] CombineColumnsBlock requires column: '{col}'")
+                        errors.append(
+                            f"[{name}] CombineColumnsBlock requires column: '{col}'"
+                        )
 
         return ValidationResult(valid=(len(errors) == 0), errors=errors)
