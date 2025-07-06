@@ -21,6 +21,9 @@ from .utilblocks import (
     FilterByValueBlock,
     IterBlock,
 )
+from .llm_utils import (
+    StringParserBlock,
+)
 from ..registry import BlockRegistry
 
 __all__ = [
@@ -29,6 +32,7 @@ __all__ = [
     "IterBlock",
     "LLMBlock",
     "ConditionalLLMBlock",
+    "StringParserBlock",
     "SamplePopulatorBlock",
     "SelectorBlock",
     "CombineColumnsBlock",
