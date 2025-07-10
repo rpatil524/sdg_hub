@@ -73,6 +73,15 @@ class TestBaseBlockInitialization:
         assert block.input_cols == ["col1", "col2"]
         assert block.output_cols == ["out1", "out2"]
 
+    def test_initialization_with_dict_columns(self):
+        """Test initialization with dictionary column specifications."""
+        input_dict = {"col1": "prompt1", "col2": "prompt2"}
+        output_dict = {"out1": "config1", "out2": "config2"}
+        block = DummyBlock("test_block", input_cols=input_dict, output_cols=output_dict)
+
+        assert block.input_cols == input_dict
+        assert block.output_cols == output_dict
+
     def test_initialization_with_kwargs(self):
         """Test initialization with additional kwargs."""
         block = DummyBlock(
@@ -122,12 +131,20 @@ class TestColumnNormalization:
         assert result == ["column"]
 
     def test_normalize_list(self):
-        """Test normalizing list returns the same list."""
+        """Test normalizing list returns a copy of the list."""
         block = DummyBlock("test_block")
         input_list = ["col1", "col2"]
         result = block._normalize_columns(input_list)
         assert result == input_list
-        assert result is input_list  # Should be the same object
+        assert result is not input_list  # Should be a copy, not the same object
+
+    def test_normalize_dict(self):
+        """Test normalizing dictionary returns a deep copy of the dictionary."""
+        block = DummyBlock("test_block")
+        input_dict = {"col1": "prompt1", "col2": "prompt2"}
+        result = block._normalize_columns(input_dict)
+        assert result == input_dict
+        assert result is not input_dict  # Should be a copy, not the same object
 
     def test_normalize_invalid_type(self):
         """Test normalizing invalid type raises ValueError."""
@@ -135,15 +152,15 @@ class TestColumnNormalization:
 
         with pytest.raises(
             ValueError,
-            match="Invalid column specification.*Must be str, List\\[str\\], or None",
+            match="Invalid column specification.*Must be str, List\\[str\\], Dict, or None",
         ):
             block._normalize_columns(123)
 
         with pytest.raises(
             ValueError,
-            match="Invalid column specification.*Must be str, List\\[str\\], or None",
+            match="Invalid column specification.*Must be str, List\\[str\\], Dict, or None",
         ):
-            block._normalize_columns({"col": "value"})
+            block._normalize_columns(set(["col"]))
 
 
 class TestValidation:
@@ -166,6 +183,15 @@ class TestValidation:
         # Should not raise any exception
         block._validate_columns(dataset)
 
+    def test_validate_columns_success_with_dict(self):
+        """Test successful column validation with dictionary input."""
+        dataset = self.create_test_dataset()
+        input_dict = {"input": "prompt1", "category": "prompt2"}
+        block = DummyBlock("test_block", input_cols=input_dict)
+
+        # Should not raise any exception
+        block._validate_columns(dataset)
+
     def test_validate_columns_no_input_cols(self):
         """Test validation with no input columns required."""
         dataset = self.create_test_dataset()
@@ -178,6 +204,19 @@ class TestValidation:
         """Test validation with missing columns."""
         dataset = self.create_test_dataset()
         block = DummyBlock("test_block", input_cols=["input", "missing_col"])
+
+        with pytest.raises(MissingColumnError) as exc_info:
+            block._validate_columns(dataset)
+
+        assert exc_info.value.block_name == "test_block"
+        assert exc_info.value.missing_columns == ["missing_col"]
+        assert set(exc_info.value.available_columns) == {"input", "category"}
+
+    def test_validate_columns_missing_with_dict(self):
+        """Test validation with missing columns using dictionary input."""
+        dataset = self.create_test_dataset()
+        input_dict = {"input": "prompt1", "missing_col": "prompt2"}
+        block = DummyBlock("test_block", input_cols=input_dict)
 
         with pytest.raises(MissingColumnError) as exc_info:
             block._validate_columns(dataset)
@@ -225,6 +264,21 @@ class TestValidation:
         dataset = self.create_test_dataset()
         block = DummyBlock(
             "test_block", output_cols=["input", "new_col"]
+        )  # "input" already exists
+
+        with pytest.raises(OutputColumnCollisionError) as exc_info:
+            block._validate_output_columns(dataset)
+
+        assert exc_info.value.block_name == "test_block"
+        assert exc_info.value.collision_columns == ["input"]
+        assert set(exc_info.value.existing_columns) == {"input", "category"}
+
+    def test_validate_output_columns_collision_with_dict(self):
+        """Test output column collision detection with dictionary output."""
+        dataset = self.create_test_dataset()
+        output_dict = {"input": "config1", "new_col": "config2"}
+        block = DummyBlock(
+            "test_block", output_cols=output_dict
         )  # "input" already exists
 
         with pytest.raises(OutputColumnCollisionError) as exc_info:
@@ -427,6 +481,23 @@ class TestGetInfo:
 
         assert info == expected
 
+    def test_get_info_with_dict_columns(self):
+        """Test get_info with dictionary column specifications."""
+        input_dict = {"input": "prompt1"}
+        output_dict = {"output": "config1"}
+        block = DummyBlock("test_block", input_cols=input_dict, output_cols=output_dict)
+
+        info = block.get_info()
+
+        expected = {
+            "block_name": "test_block",
+            "block_type": "DummyBlock",
+            "input_cols": input_dict,
+            "output_cols": output_dict,
+        }
+
+        assert info == expected
+
     def test_get_info_no_columns(self):
         """Test get_info with no columns specified."""
         block = DummyBlock("test_block")
@@ -454,35 +525,35 @@ class TestCustomValidation:
     def test_custom_validation_hook_called(self):
         """Test that custom validation hook is called during __call__."""
         dataset = self.create_test_dataset()
-        
+
         # Create a block that tracks if custom validation was called
         class TestBlockWithCustomValidation(DummyBlock):
             def __init__(self, block_name: str, **kwargs):
                 super().__init__(block_name, **kwargs)
                 self.custom_validation_called = False
-                
+
             def _validate_custom(self, dataset):
                 self.custom_validation_called = True
                 super()._validate_custom(dataset)
-        
+
         block = TestBlockWithCustomValidation("test_block", input_cols=["input"])
-        
+
         # Call the block - this should trigger custom validation
         result = block(dataset)
-        
+
         # Verify custom validation was called
         assert block.custom_validation_called is True
 
     def test_custom_validation_failure(self):
         """Test that custom validation failures are properly raised."""
         dataset = self.create_test_dataset()
-        
+
         class TestBlockWithFailingValidation(DummyBlock):
             def _validate_custom(self, dataset):
                 raise BlockValidationError("Custom validation failed", "Test details")
-        
+
         block = TestBlockWithFailingValidation("test_block", input_cols=["input"])
-        
+
         # Custom validation failure should be raised
         with pytest.raises(BlockValidationError, match="Custom validation failed"):
             block(dataset)
@@ -490,31 +561,33 @@ class TestCustomValidation:
     def test_custom_validation_order(self):
         """Test that custom validation happens after standard validation."""
         empty_dataset = Dataset.from_list([])
-        
+
         class TestBlockValidationOrder(DummyBlock):
             def __init__(self, block_name: str, **kwargs):
                 super().__init__(block_name, **kwargs)
                 self.custom_validation_called = False
-                
+
             def _validate_custom(self, dataset):
                 self.custom_validation_called = True
-        
+
         block = TestBlockValidationOrder("test_block")
-        
+
         # Should fail on empty dataset validation before custom validation
         with pytest.raises(EmptyDatasetError):
             block(empty_dataset)
-        
+
         # Custom validation should not have been called due to early failure
         assert block.custom_validation_called is False
 
     def test_custom_validation_with_dataset_access(self):
         """Test that custom validation can access and inspect dataset."""
-        dataset = self.create_test_dataset([
-            {"input": "valid", "special": "good"},
-            {"input": "invalid", "special": "bad"},
-        ])
-        
+        dataset = self.create_test_dataset(
+            [
+                {"input": "valid", "special": "good"},
+                {"input": "invalid", "special": "bad"},
+            ]
+        )
+
         class TestBlockWithDatasetValidation(DummyBlock):
             def _validate_custom(self, dataset):
                 # Check that all 'special' values are 'good'
@@ -523,30 +596,124 @@ class TestCustomValidation:
                         raise BlockValidationError(
                             f"Invalid special value in row {i}: {sample['special']}"
                         )
-        
+
         block = TestBlockWithDatasetValidation("test_block", input_cols=["input"])
-        
+
         # Should fail because second row has 'bad' value
-        with pytest.raises(BlockValidationError, match="Invalid special value in row 1: bad"):
+        with pytest.raises(
+            BlockValidationError, match="Invalid special value in row 1: bad"
+        ):
             block(dataset)
 
     @patch("sdg_hub.blocks.base.console")
     def test_custom_validation_with_logging(self, mock_console):
         """Test that custom validation works with Rich logging."""
         dataset = self.create_test_dataset()
-        
+
         class TestBlockWithLoggingValidation(DummyBlock):
             def _validate_custom(self, dataset):
                 # Custom validation that passes
                 logger.info("Custom validation passed")
-        
+
         block = TestBlockWithLoggingValidation("test_block", input_cols=["input"])
-        
+
         # Should succeed and show logging panels
         result = block(dataset)
-        
+
         # Verify logging was called (input and output panels)
         assert mock_console.print.call_count == 2
+
+
+class TestDictionaryMutationProtection:
+    """Test that dictionary columns are protected from external mutations."""
+
+    def test_input_dict_mutation_protection(self):
+        """Test that external changes to input dict don't affect stored version."""
+        original_dict = {"col1": "template1", "col2": "template2"}
+        block = DummyBlock("test_block", input_cols=original_dict)
+        
+        # Verify initial state
+        assert block.input_cols == original_dict
+        
+        # Modify original dictionary
+        original_dict["col3"] = "template3"
+        original_dict["col1"] = "MODIFIED"
+        
+        # Block's internal state should be unchanged
+        assert block.input_cols == {"col1": "template1", "col2": "template2"}
+        assert "col3" not in block.input_cols
+        assert block.input_cols["col1"] == "template1"
+
+    def test_output_dict_mutation_protection(self):
+        """Test that external changes to output dict don't affect stored version."""
+        original_dict = {"output1": "result1", "output2": "result2"}
+        block = DummyBlock("test_block", output_cols=original_dict)
+        
+        # Verify initial state
+        assert block.output_cols == original_dict
+        
+        # Modify original dictionary
+        original_dict["output3"] = "result3"
+        del original_dict["output1"]
+        
+        # Block's internal state should be unchanged
+        assert block.output_cols == {"output1": "result1", "output2": "result2"}
+        assert "output3" not in block.output_cols
+
+    def test_nested_dict_mutation_protection(self):
+        """Test that nested dictionaries are also protected from mutations."""
+        nested_dict = {
+            "col1": {"template": "value1", "params": {"nested": "deep"}},
+            "col2": {"template": "value2"}
+        }
+        block = DummyBlock("test_block", input_cols=nested_dict)
+        
+        # Modify nested structure
+        nested_dict["col1"]["template"] = "MODIFIED"
+        nested_dict["col1"]["params"]["nested"] = "CHANGED"
+        nested_dict["col2"]["new_key"] = "new_value"
+        
+        # Block's internal state should be unchanged
+        assert block.input_cols["col1"]["template"] == "value1"
+        assert block.input_cols["col1"]["params"]["nested"] == "deep"
+        assert "new_key" not in block.input_cols["col2"]
+
+    def test_property_returns_independent_copies(self):
+        """Test that each call to input_cols/output_cols returns independent copies."""
+        original_dict = {"col1": "template1", "col2": "template2"}
+        block = DummyBlock("test_block", input_cols=original_dict)
+        
+        # Get two copies
+        copy1 = block.input_cols
+        copy2 = block.input_cols
+        
+        # They should be equal but not the same object
+        assert copy1 == copy2
+        assert copy1 is not copy2
+        
+        # Modifying one shouldn't affect the other
+        copy1["col3"] = "template3"
+        assert "col3" not in copy2
+        assert "col3" not in block.input_cols
+
+    def test_mixed_type_immutability(self):
+        """Test immutability works correctly for both lists and dicts."""
+        list_cols = ["col1", "col2"]
+        dict_cols = {"col3": "template3", "col4": "template4"}
+        
+        block1 = DummyBlock("test1", input_cols=list_cols, output_cols=dict_cols)
+        block2 = DummyBlock("test2", input_cols=dict_cols, output_cols=list_cols)
+        
+        # Modify originals
+        list_cols.append("col5")
+        dict_cols["col6"] = "template6"
+        
+        # Blocks should be unaffected
+        assert len(block1.input_cols) == 2
+        assert len(block2.output_cols) == 2
+        assert "col5" not in block1.input_cols
+        assert "col6" not in block1.output_cols
+        assert "col6" not in block2.input_cols
 
 
 class TestEdgeCases:

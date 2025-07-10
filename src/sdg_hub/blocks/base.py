@@ -7,6 +7,7 @@ with unified constructor patterns, column handling, and common functionality.
 
 # Standard
 from abc import ABC, abstractmethod
+from copy import deepcopy
 from typing import Any, Dict, List, Optional, Union
 
 # Third Party
@@ -51,17 +52,17 @@ class BaseBlock(ABC):
     ----------
     block_name : str
         Name of the block instance.
-    input_cols : List[str]
-        Normalized list of input column names.
-    output_cols : List[str]
-        Normalized list of output column names.
+    input_cols : Union[List[str], Dict[str, Any]]
+        Normalized input column specification.
+    output_cols : Union[List[str], Dict[str, Any]]
+        Normalized output column specification.
     """
 
     def __init__(
         self,
         block_name: str,
-        input_cols: Optional[Union[str, List[str]]] = None,
-        output_cols: Optional[Union[str, List[str]]] = None,
+        input_cols: Optional[Union[str, List[str], Dict[str, Any]]] = None,
+        output_cols: Optional[Union[str, List[str], Dict[str, Any]]] = None,
         **kwargs: Any,
     ) -> None:
         """Initialize base block with standardized parameters."""
@@ -86,43 +87,53 @@ class BaseBlock(ABC):
         return self._block_name
 
     @property
-    def input_cols(self) -> List[str]:
-        """Get the input column names (immutable)."""
+    def input_cols(self) -> Union[List[str], Dict[str, Any]]:
+        """Get the input column specification (immutable)."""
+        if isinstance(self._input_cols, dict):
+            return deepcopy(self._input_cols)
         return self._input_cols.copy()
 
     @property
-    def output_cols(self) -> List[str]:
-        """Get the output column names (immutable)."""
+    def output_cols(self) -> Union[List[str], Dict[str, Any]]:
+        """Get the output column specification (immutable)."""
+        if isinstance(self._output_cols, dict):
+            return deepcopy(self._output_cols)
         return self._output_cols.copy()
 
-    def _normalize_columns(self, cols: Optional[Union[str, List[str]]]) -> List[str]:
-        """Normalize column specifications to list format.
+    def _normalize_columns(
+        self, cols: Optional[Union[str, List[str], Dict[str, Any]]]
+    ) -> Union[List[str], Dict[str, Any]]:
+        """Normalize column specifications to appropriate format.
 
         Parameters
         ----------
-        cols : Optional[Union[str, List[str]]]
-            Column specification as string, list of strings, or None.
+        cols : Optional[Union[str, List[str], Dict[str, Any]]]
+            Column specification as string, list of strings, dictionary keys, or None.
 
         Returns
         -------
-        List[str]
-            Normalized list of column names. Empty list if cols is None.
+        Union[List[str], Dict[str, Any]]
+            Normalized column specification. Returns empty list if cols is None,
+            single-item list for strings, copy of list for lists, or deep copy
+            of dictionary for dictionaries.
 
         Raises
         ------
         ValueError
-            If cols is not None, str, or List[str].
+            If cols is not None, str, List[str], or Dict.
         """
         if cols is None:
             return []
         if isinstance(cols, str):
             return [cols]
         if isinstance(cols, list):
-            return cols
+            return cols.copy()
+        if isinstance(cols, dict):
+            return deepcopy(cols)
 
-        # This will only be reached if cols is not None, str, or list
+        # This will only be reached if cols is not None, str, list, or dict
         raise ValueError(
-            f"Invalid column specification: {cols} (type: {type(cols)}). Must be str, List[str], or None."
+            f"Invalid column specification: {cols} (type: {type(cols)}). Must be str, List[str], Dict, or None."
         )
 
     def _validate_columns(self, dataset: Dataset) -> None:
@@ -141,8 +152,14 @@ class BaseBlock(ABC):
         if not self._input_cols:
             return
 
+        # Get column names to check based on type
+        if isinstance(self._input_cols, dict):
+            columns_to_check = list(self._input_cols.keys())
+        else:
+            columns_to_check = self._input_cols
+
         missing_columns = [
-            col for col in self._input_cols if col not in dataset.column_names
+            col for col in columns_to_check if col not in dataset.column_names
         ]
 
         if missing_columns:
@@ -196,8 +213,14 @@ class BaseBlock(ABC):
         if not self._output_cols:
             return
 
+        # Get column names to check based on type
+        if isinstance(self._output_cols, dict):
+            columns_to_check = list(self._output_cols.keys())
+        else:
+            columns_to_check = self._output_cols
+
         collision_columns = [
-            col for col in self._output_cols if col in dataset.column_names
+            col for col in columns_to_check if col in dataset.column_names
         ]
 
         if collision_columns:
@@ -235,18 +258,18 @@ class BaseBlock(ABC):
         self._validate_dataset_not_empty(dataset)
         self._validate_columns(dataset)
         self._validate_output_columns(dataset)
-    
+
     def _validate_custom(self, dataset: Dataset) -> None:
         """Hook for subclasses to add custom validation logic.
-        
+
         Override this method in subclasses to add block-specific validation
         that goes beyond the standard column and dataset validation.
-        
+
         Parameters
         ----------
         dataset : Dataset
             The dataset to validate.
-            
+
         Raises
         ------
         BlockValidationError
@@ -269,21 +292,24 @@ class BaseBlock(ABC):
         # Create input panel content
         content = Text()
         content.append("📊 Processing Input Data\n", style="bold blue")
-        content.append(f"Block Type: ", style="dim")
+        content.append("Block Type: ", style="dim")
         content.append(f"{self.__class__.__name__}\n", style="cyan")
-        content.append(f"Input Rows: ", style="dim")
+        content.append("Input Rows: ", style="dim")
         content.append(f"{row_count:,}\n", style="bold cyan")
-        content.append(f"Input Columns: ", style="dim")
+        content.append("Input Columns: ", style="dim")
         content.append(f"{len(columns)}\n", style="cyan")
-        content.append(f"Column Names: ", style="dim")
+        content.append("Column Names: ", style="dim")
         content.append(f"{', '.join(columns)}\n", style="white")
 
         if self._output_cols:
-            content.append(f"Expected Output Columns: ", style="dim")
-            content.append(f"{', '.join(self._output_cols)}", style="green")
+            content.append("Expected Output Columns: ", style="dim")
+            if isinstance(self._output_cols, dict):
+                content.append(f"{', '.join(self._output_cols.keys())}", style="green")
+            else:
+                content.append(f"{', '.join(self._output_cols)}", style="green")
         else:
-            content.append(f"Expected Output Columns: ", style="dim")
-            content.append(f"None specified", style="dim")
+            content.append("Expected Output Columns: ", style="dim")
+            content.append("None specified", style="dim")
 
         # Create and log panel
         panel = Panel(
@@ -320,7 +346,7 @@ class BaseBlock(ABC):
         content.append("✅ Processing Complete\n", style="bold green")
 
         # Row changes
-        content.append(f"Rows: ", style="dim")
+        content.append("Rows: ", style="dim")
         content.append(f"{input_rows:,}", style="cyan")
         content.append(" → ", style="dim")
         content.append(f"{output_rows:,}", style="cyan")
@@ -330,11 +356,11 @@ class BaseBlock(ABC):
         elif rows_added < 0:
             content.append(f" ({rows_added:,})", style="bold red")
         else:
-            content.append(f" (no change)", style="dim")
+            content.append(" (no change)", style="dim")
         content.append("\n")
 
         # Column changes
-        content.append(f"Columns: ", style="dim")
+        content.append("Columns: ", style="dim")
         content.append(f"{len(input_columns)}", style="cyan")
         content.append(" → ", style="dim")
         content.append(f"{len(output_columns)}", style="cyan")
@@ -343,7 +369,7 @@ class BaseBlock(ABC):
         if total_column_changes > 0:
             content.append(f" ({total_column_changes} changes)", style="yellow")
         else:
-            content.append(f" (no changes)", style="dim")
+            content.append(" (no changes)", style="dim")
         content.append("\n")
 
         # Detail column changes
@@ -425,7 +451,7 @@ class BaseBlock(ABC):
 
         # Perform comprehensive dataset validation
         self._validate_dataset(samples)
-        
+
         # Allow subclasses to add custom validation
         self._validate_custom(samples)
 
