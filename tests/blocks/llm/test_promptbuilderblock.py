@@ -34,7 +34,7 @@ class TestPromptBuilderBlock:
 
         assert block.block_name == "test_block"
         assert block.input_col_map == {"input_text": "input_text"}
-        assert block.output_cols == "output"
+        assert block.output_cols == ["output"]
         assert block.format_as_messages is True
         assert block.default_role == "user"
 
@@ -65,13 +65,66 @@ class TestPromptBuilderBlock:
 
     def test_init_with_invalid_input_cols(self):
         """Test initialization with invalid input_cols type."""
-        with pytest.raises(ValueError, match="input_cols must be str, list, or dict"):
+        with pytest.raises(ValueError, match="Invalid column specification"):
             PromptBuilderBlock(
                 block_name="test_block",
                 input_cols=123,  # Invalid type
                 output_cols="output",
                 prompt_config_path=TEST_CONFIG_WITH_SYSTEM,
             )
+
+    def test_init_with_multiple_output_cols(self):
+        """Test initialization with multiple output columns raises error."""
+        with pytest.raises(
+            ValueError, match="PromptBuilderBlock expects exactly one output column"
+        ):
+            PromptBuilderBlock(
+                block_name="test_block",
+                input_cols="input_text",
+                output_cols=["output1", "output2"],
+                prompt_config_path=TEST_CONFIG_WITH_SYSTEM,
+            )
+
+    def test_init_with_invalid_config_path(self):
+        """Test initialization with invalid config path raises error."""
+        with pytest.raises(FileNotFoundError):
+            PromptBuilderBlock(
+                block_name="test_block",
+                input_cols="input_text",
+                output_cols="output",
+                prompt_config_path="/nonexistent/path.yaml",
+            )
+
+    def test_init_with_invalid_yaml_config(self, tmp_path):
+        """Test initialization with invalid YAML config returns None and raises ValueError."""
+        # Create a file with invalid YAML
+        invalid_config = tmp_path / "invalid.yaml"
+        invalid_config.write_text("invalid: yaml: content: [unclosed")
+        
+        with pytest.raises(ValueError, match="Failed to load prompt configuration"):
+            PromptBuilderBlock(
+                block_name="test_block",
+                input_cols="input_text",
+                output_cols="output",
+                prompt_config_path=str(invalid_config),
+            )
+
+    def test_load_config_with_yaml_error(self, tmp_path):
+        """Test _load_config handles YAML parsing errors."""
+        # Create a temporary invalid YAML file
+        invalid_config = tmp_path / "invalid.yaml"
+        invalid_config.write_text("invalid: yaml: [unclosed")
+        
+        block = PromptBuilderBlock(
+            block_name="test_block",
+            input_cols="input_text",
+            output_cols="output",
+            prompt_config_path=TEST_CONFIG_NO_SYSTEM,
+        )
+        
+        # Test that _load_config returns None for invalid YAML
+        result = block._load_config(str(invalid_config))
+        assert result is None
 
     def test_resolve_template_vars_with_string_cols(self):
         """Test _resolve_template_vars with string input_cols."""
@@ -431,3 +484,29 @@ class TestPromptBuilderBlock:
         assert result[0]["id"] == 1
         assert result[0]["metadata"] == {"key": "value"}
         assert "messages" in result[0]
+
+    def test_baseblock_integration(self):
+        """Test that PromptBuilderBlock properly integrates with BaseBlock."""
+        block = PromptBuilderBlock(
+            block_name="test_block",
+            input_cols="input_text",
+            output_cols="output",
+            prompt_config_path=TEST_CONFIG_NO_SYSTEM,
+        )
+
+        # Test BaseBlock properties
+        assert block.block_name == "test_block"
+        assert block.input_cols == ["input_text"]
+        assert block.output_cols == ["output"]
+
+        # Test that it has BaseBlock methods
+        assert hasattr(block, "_validate_custom")
+        assert hasattr(block, "_log_input_data")
+        assert hasattr(block, "_log_output_data")
+
+        # Test get_info method from BaseBlock
+        info = block.get_info()
+        assert info["block_name"] == "test_block"
+        assert info["block_type"] == "PromptBuilderBlock"
+        assert info["input_cols"] == ["input_text"]
+        assert info["output_cols"] == ["output"]
