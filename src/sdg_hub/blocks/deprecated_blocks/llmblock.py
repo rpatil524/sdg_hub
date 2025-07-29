@@ -9,22 +9,23 @@ Use the new modular approach with PromptBuilderBlock, LLMChatBlock, and TextPars
 
 # Standard
 from typing import Any, Dict, List, Optional, Set
+import os
 import tempfile
 import warnings
 
 # Third Party
 from datasets import Dataset
+from jinja2 import Environment, meta
 import openai
 import yaml
-from jinja2 import Environment, meta
 
 # Local
 from ...logger_config import setup_logger
-from ...registry import BlockRegistry
 from ..base import BaseBlock
 from ..llm.llm_chat_block import LLMChatBlock
 from ..llm.prompt_builder_block import PromptBuilderBlock
 from ..llm.text_parser_block import TextParserBlock
+from ..registry import BlockRegistry
 
 logger = setup_logger(__name__)
 
@@ -61,7 +62,11 @@ def server_supports_batched(client: Any, model_id: str) -> bool:
     return supported
 
 
-@BlockRegistry.register("LLMBlock")
+@BlockRegistry.register(
+    block_name="LLMBlock",
+    category="deprecated",
+    description="DEPRECATED: Use the new modular approach with PromptBuilderBlock, LLMChatBlock, and TextParserBlock instead",
+)
 class LLMBlock(BaseBlock):
     """DEPRECATED: Block for generating text using language models.
 
@@ -375,7 +380,14 @@ class LLMBlock(BaseBlock):
             else:
                 # Step 4: Parse responses using TextParserBlock (if configured) - n=1 case
                 if self.text_parser:
+                    logger.info(
+                        f"DEPRECATED LLMBlock '{self.block_name}' before parsing (n=1): {len(chat_result)} samples"
+                    )
                     final_result = self.text_parser.generate(chat_result)
+                    logger.info(
+                        f"DEPRECATED LLMBlock '{self.block_name}' after parsing (n=1): {len(final_result)} samples"
+                    )
+
                 else:
                     # If no parser, just rename the raw_response column to the first output column
                     if self.output_cols:
@@ -384,28 +396,68 @@ class LLMBlock(BaseBlock):
                         )
                     else:
                         final_result = chat_result
-                # Step 5: Merge with original samples for n=1 case
-                merged_data = []
-                for orig_sample, result_sample in zip(samples, final_result):
-                    merged_sample = {**orig_sample}
-                    for output_col in self.output_cols:
-                        if output_col in result_sample:
-                            response = result_sample[output_col]
-                            # Handle case where response might still be a list with 1 item
-                            if isinstance(response, list) and len(response) == 1:
-                                merged_sample[output_col] = response[0]
-                            elif isinstance(response, list):
-                                # Multiple responses but n=1 - take first one
-                                merged_sample[output_col] = (
-                                    response[0] if response else ""
-                                )
-                            else:
-                                merged_sample[output_col] = response
-                        else:
-                            merged_sample[output_col] = ""
-                    merged_data.append(merged_sample)
 
-                return Dataset.from_list(merged_data)
+                # Step 5: Merge with original samples for n=1 case
+                # Handle different parsing outcomes: expansion, contraction, or 1:1
+                if len(final_result) != len(samples):
+                    # Row count changed - parsing found different number of results than inputs
+                    if len(final_result) > len(samples):
+                        logger.info(
+                            f"DEPRECATED LLMBlock '{self.block_name}' detected row expansion: {len(samples)} -> {len(final_result)}"
+                        )
+                    else:
+                        logger.info(
+                            f"DEPRECATED LLMBlock '{self.block_name}' detected row contraction: {len(samples)} -> {len(final_result)}"
+                        )
+
+                    # For both expansion and contraction, return parsed results
+                    # Keep only the expected output columns plus any preserved input columns
+                    # Remove intermediate processing columns to avoid duplicates
+                    desired_columns = set(self.output_cols)  # Required output columns
+                    available_columns = set(final_result.column_names)
+
+                    # Add input columns that were preserved (excluding processing columns like raw_response, messages)
+                    processing_columns = {
+                        "raw_response",
+                        "messages",
+                    }  # Common intermediate columns
+                    for col in available_columns:
+                        if col not in processing_columns and col not in desired_columns:
+                            # This is likely a preserved input column
+                            desired_columns.add(col)
+
+                    # Filter to only the columns we want
+                    columns_to_keep = [
+                        col
+                        for col in final_result.column_names
+                        if col in desired_columns
+                    ]
+                    final_dataset = final_result.select_columns(columns_to_keep)
+
+                else:
+                    # Normal 1:1 case - merge with original samples to preserve all input columns
+                    merged_data = []
+                    for orig_sample, result_sample in zip(samples, final_result):
+                        merged_sample = {**orig_sample}
+                        for output_col in self.output_cols:
+                            if output_col in result_sample:
+                                response = result_sample[output_col]
+                                # Handle case where response might still be a list with 1 item
+                                if isinstance(response, list) and len(response) == 1:
+                                    merged_sample[output_col] = response[0]
+                                elif isinstance(response, list):
+                                    # Multiple responses but n=1 - take first one
+                                    merged_sample[output_col] = (
+                                        response[0] if response else ""
+                                    )
+                                else:
+                                    merged_sample[output_col] = response
+                            else:
+                                merged_sample[output_col] = ""
+                        merged_data.append(merged_sample)
+                    final_dataset = Dataset.from_list(merged_data)
+
+                return final_dataset
 
         except Exception as e:
             logger.error(f"Error in deprecated LLMBlock generation: {e}")
@@ -421,9 +473,6 @@ class LLMBlock(BaseBlock):
     def __del__(self):
         """Clean up temporary files."""
         try:
-            # Standard
-            import os
-
             if hasattr(self, "_temp_prompt_config"):
                 os.unlink(self._temp_prompt_config)
         except Exception:
