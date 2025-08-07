@@ -27,18 +27,25 @@ pip install .[dev]
 
 ### Linting and Code Quality
 
-SDG Hub uses a Makefile for linting:
-
-- **CI changes** - `make actionlint`
-- **Documentation changes** - `make md-lint` 
-- **Code changes** - `make verify`
-
-Individual linting tools:
+**Primary linting tools** (required for all contributions):
 ```bash
 tox -e lint        # Full pylint check
 tox -e fastlint    # Quick pylint check
-tox -e ruff        # Ruff formatting and fixes
 tox -e mypy        # Type checking
+
+# Ruff (code formatting and linting)
+tox -e ruff                 # Format and fix issues (development mode)
+tox -e ruff -- check        # Check only, no fixes (CI mode)
+./scripts/ruff.sh           # Direct script - format and fix
+./scripts/ruff.sh check     # Direct script - check only
+./scripts/ruff.sh --help    # Pass custom arguments to ruff
+```
+
+**Optional development tools** (require additional dependencies):
+```bash
+make actionlint          # Lint GitHub Actions (requires: actionlint, shellcheck)
+make md-lint            # Lint markdown files (requires: podman/docker)
+make verify             # Run extended checks: pylint, mypy, ruff (may differ from CI)
 ```
 
 ### Testing
@@ -171,5 +178,74 @@ For comprehensive guides and examples:
 - **GitHub Discussions** - Ask questions, share ideas
 - **Documentation** - Check existing docs first
 - **Code Examples** - Look at existing implementations
+
+You can run all tests by simply running the `tox -e py3-unit` command.
+
+## Documentation Guidelines
+
+### NumPy-Style Docstrings
+
+If you choose to add docstrings to your functions, we recommend following the NumPy docstring format for consistency with the scientific Python ecosystem.
+
+#### Basic Structure
+
+```python
+def example_function(param1, param2=None):
+    """Brief description of the function.
+
+    Longer description providing more context about what the function does,
+    its purpose, and any important behavioral notes.
+
+    Parameters
+    ----------
+    param1 : str
+        Description of the first parameter
+    param2 : int, optional
+        Description of the second parameter (default: None)
+
+    Returns
+    -------
+    bool
+        Description of what the function returns
+
+    Raises
+    ------
+    ValueError
+        When invalid input is provided
+
+    Examples
+    --------
+    >>> result = example_function("hello", 42)
+    >>> print(result)
+    True
+    """
+```
+
+#### Key Guidelines
+
+- **Summary**: Start with a concise one-line description
+- **Parameters**: Document all function parameters with types and descriptions
+- **Returns**: Describe return values with types and meaning
+- **Types**: Use standard Python types (`str`, `int`, `list`, `dict`, etc.)
+- **Optional parameters**: Mark default parameters as "optional"
+- **Examples**: Include simple usage examples when helpful
+
+#### When to Add Docstrings
+
+Docstrings are **optional** but recommended for:
+- Public API functions and classes
+- Complex functions with multiple parameters
+- Functions that might be confusing to other developers
+- Core framework components
+
+#### When to Skip Docstrings
+
+You may skip docstrings for:
+- Simple utility functions with obvious behavior
+- Private/internal functions (starting with `_`)
+- Functions with self-explanatory names and simple parameters
+
+**Remember**: Quality over quantity. A well-written docstring is better than a verbose one, and no docstring is better than a poor one.
+
 
 Thank you for contributing to SDG Hub! 🎉
