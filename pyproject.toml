@@ -12,9 +12,8 @@ authors = [
 description = "Synthetic Data Generation"
 readme = "README.md"
 license = {text = "Apache-2.0"}
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 classifiers = [
-    "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "License :: OSI Approved :: Apache Software License",
     "License :: OSI Approved :: MIT License",
@@ -37,6 +36,8 @@ dependencies = [
     "litellm>=1.61.15",
     "openai>=1.13.3,<2.0.0",
     "rich",
+    "pydantic>=2.0.0,<3.0.0",         # cap before v3; adjust the lower bound to the minimum v2.x you’ve tested
+    "python-dotenv>=1.0.0,<2.0.0",    # cap before v2 to avoid breaking changes
     "tenacity>=8.3.0,!=8.4.0",
     "tqdm>=4.66.2,<5.0.0",
 ]
@@ -62,6 +63,16 @@ examples = [
     "transformers>=4.37.0",
     "langchain-text-splitters",
     "docling>=2.3.0",
+    "scikit-learn",
+    "pandas",
+    "polars",
+    "matplotlib",
+    "spacy",
+    "nltk",
+    "sentence-transformers",
+    "instructor",
+    "fastapi",
+    "nest-asyncio",
 ]
 dev = [
     "pre-commit>=3.0.4,<4.0",
@@ -72,6 +83,7 @@ dev = [
     "pytest-cov",
     "pytest-html",
     "tox>=4.4.2,<5",
+    "ruff",
 ]
 
 [tool.setuptools_scm]
