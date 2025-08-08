@@ -10,16 +10,7 @@
 
 A modular Python framework for building synthetic data generation pipelines using composable blocks and flows. Transform datasets through **building-block composition** - mix and match LLM-powered and traditional processing blocks to create sophisticated data generation workflows.
 
-## 🧱 Core Concepts
-
-**Blocks** are composable units that transform datasets - think of them as data processing Lego pieces. Each block performs a specific task: LLM chat, text parsing, evaluation, or transformation.
-
-**Flows** orchestrate multiple blocks into complete pipelines defined in YAML. Chain blocks together to create complex data generation workflows with validation and parameter management.
-
-```python
-# Simple concept: Blocks transform data, Flows chain blocks together
-dataset → Block₁ → Block₂ → Block₃ → enriched_dataset
-```
+**📖 Full documentation available at: [https://ai-innovation.team/sdg_hub](https://ai-innovation.team/sdg_hub)**
 
 ## ✨ Key Features
 
@@ -35,40 +26,49 @@ dataset → Block₁ → Block₂ → Block₃ → enriched_dataset
 
 **🧩 Easily Extensible** - Create custom blocks with simple inheritance. Rich logging and monitoring built-in.
 
-## 📚 Documentation
-
-For comprehensive documentation, including detailed API references, tutorials, and advanced usage examples, visit our **[documentation site](https://ai-innovation.team/sdg_hub/)**.
 
 ## 📦 Installation
 
+Recommended: Install uv  — see https://docs.astral.sh/uv/getting-started/installation/
 
 ```bash
 # Production
-pip install sdg-hub
+uv pip install sdg-hub
 
 # Development
 git clone https://github.com/Red-Hat-AI-Innovation-Team/sdg_hub.git
 cd sdg_hub
-pip install .[dev]
-# or with uv: uv sync --extra dev
+uv pip install .[dev]
+# or: uv sync --extra dev
 ```
 
 ### Optional Dependencies
 ```bash
 # For vLLM support
-pip install sdg-hub[vllm]
-# or with uv: uv pip install sdg-hub[vllm]
+uv pip install sdg-hub[vllm]
 
 # For examples
-pip install sdg-hub[examples]
-# or with uv: uv pip install sdg-hub[examples]
+ pip install sdg-hub[examples]
 ```
 
 ## 🚀 Quick Start
 
-### Flow Discovery
+### 🧱 Core Concepts
+
+**Blocks** are composable units that transform datasets - think of them as data processing Lego pieces. Each block performs a specific task: LLM chat, text parsing, evaluation, or transformation.
+
+**Flows** orchestrate multiple blocks into complete pipelines defined in YAML. Chain blocks together to create complex data generation workflows with validation and parameter management.
+
 ```python
-from sdg_hub.core.flow import FlowRegistry
+# Simple concept: Blocks transform data, Flows chain blocks together
+dataset → Block₁ → Block₂ → Block₃ → enriched_dataset
+```
+
+### Try it out!
+
+#### Flow Discovery
+```python
+from sdg_hub import FlowRegistry
 
 # Auto-discover all available flows (no setup needed!)
 FlowRegistry.discover_flows()
@@ -82,9 +82,9 @@ qa_flows = FlowRegistry.search_flows(tag="question-generation")
 print(f"QA flows: {qa_flows}")
 ```
 
-### Using Flows
+#### Using Flows
 ```python
-from sdg_hub.core.flow import FlowRegistry, Flow
+from sdg_hub import FlowRegistry, Flow
 from datasets import Dataset
 
 # Load the flow by name
@@ -97,6 +97,7 @@ default_model = flow.get_default_model()
 recommendations = flow.get_model_recommendations()
 
 # Configure model settings at runtime
+# This assumes you have a hosted vLLM instance of meta-llama/Llama-3.3-70B-Instruct running at http://localhost:8000/v1
 flow.set_model_config(
     model=f"hosted_vllm/{default_model}",
     api_base="http://localhost:8000/v1",
@@ -127,7 +128,7 @@ faithfulness_scores = result['faithfulness_judgment']
 relevancy_scores = result['relevancy_score']
 ```
 
-### Quick Testing with Dry Run
+#### Quick Testing with Dry Run
 ```python
 # Test the flow with a small sample first
 dry_result = flow.dry_run(dataset, sample_size=1)
