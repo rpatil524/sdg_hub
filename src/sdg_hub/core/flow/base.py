@@ -4,6 +4,7 @@
 # Standard
 from pathlib import Path
 from typing import Any, Optional, Union
+import time
 
 # Third Party
 from datasets import Dataset
@@ -20,6 +21,7 @@ from ..blocks.registry import BlockRegistry
 from ..utils.error_handling import EmptyDatasetError, FlowValidationError
 from ..utils.logger_config import setup_logger
 from ..utils.path_resolution import resolve_path
+from ..utils.yaml_utils import save_flow_yaml
 from .metadata import FlowMetadata, FlowParameter
 from .migration import FlowMigration
 from .validation import FlowValidator
@@ -137,7 +139,17 @@ class Flow(BaseModel):
         -------
         Flow
             Validated Flow instance.
+
+        Raises
+        ------
+        FlowValidationError
+            If yaml_path is None or the file doesn't exist.
         """
+        if yaml_path is None:
+            raise FlowValidationError(
+                "Flow path cannot be None. Please provide a valid YAML file path or check that the flow exists in the registry."
+            )
+
         yaml_path = resolve_path(yaml_path, [])
         yaml_dir = Path(yaml_path).parent
 
@@ -164,6 +176,8 @@ class Flow(BaseModel):
             flow_config, migrated_runtime_params = FlowMigration.migrate_to_new_format(
                 flow_config, yaml_path
             )
+            # Save migrated config back to YAML to persist id
+            save_flow_yaml(yaml_path, flow_config, "migrated to new format")
 
         # Validate YAML structure
         validator = FlowValidator()
@@ -225,6 +239,17 @@ class Flow(BaseModel):
         # Create and validate the flow
         try:
             flow = cls(blocks=blocks, metadata=metadata, parameters=parameters)
+            # Persist generated id back to the YAML file (only on initial load)
+            # If the file had no metadata.id originally, update and rewrite
+            if not flow_config.get("metadata", {}).get("id"):
+                flow_config.setdefault("metadata", {})["id"] = flow.metadata.id
+                save_flow_yaml(
+                    yaml_path,
+                    flow_config,
+                    f"added generated id: {flow.metadata.id}",
+                )
+            else:
+                logger.debug(f"Flow already had id: {flow.metadata.id}")
             # Store migrated runtime params and client for backward compatibility
             if migrated_runtime_params:
                 flow._migrated_runtime_params = migrated_runtime_params
@@ -788,9 +813,6 @@ class Flow(BaseModel):
             "execution_time_seconds": 0,
         }
 
-        # Standard
-        import time
-
         start_time = time.time()
 
         try:
@@ -1052,10 +1074,7 @@ class Flow(BaseModel):
                 name: param.model_dump() for name, param in self.parameters.items()
             }
 
-        with open(output_path, "w", encoding="utf-8") as f:
-            yaml.dump(config, f, default_flow_style=False, sort_keys=False)
-
-        logger.info(f"Flow configuration saved to: {output_path}")
+        save_flow_yaml(output_path, config)
 
     def __len__(self) -> int:
         """Number of blocks in the flow."""

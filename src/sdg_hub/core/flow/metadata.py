@@ -9,6 +9,9 @@ from typing import Any, Optional
 # Third Party
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+# Local
+from ..utils.flow_identifier import get_flow_identifier
+
 
 class ModelCompatibility(str, Enum):
     """Model compatibility levels."""
@@ -238,6 +241,8 @@ class FlowMetadata(BaseModel):
 
     Attributes
     ----------
+    id : str
+        Unique identifier for the flow.
     name : str
         Human-readable name of the flow.
     description : str
@@ -267,6 +272,9 @@ class FlowMetadata(BaseModel):
     """
 
     name: str = Field(..., min_length=1, description="Human-readable name")
+    id: str = Field(
+        default="", description="Unique identifier for the flow, generated from name"
+    )
     description: str = Field(default="", description="Detailed description")
     version: str = Field(
         default="1.0.0",
@@ -304,6 +312,31 @@ class FlowMetadata(BaseModel):
         default="", description="Estimated duration for flow execution"
     )
 
+    @field_validator("id")
+    @classmethod
+    def validate_id(cls, v: str) -> str:
+        """Validate flow id."""
+        # Note: Auto-generation is handled in the model_validator since field_validator
+        # doesn't have access to other field values in Pydantic v2
+
+        # Validate id format if provided
+        if v:
+            # Must be lowercase
+            if not v.islower():
+                raise ValueError("id must be lowercase")
+
+            # Must contain only alphanumeric characters and hyphens
+            if not v.replace("-", "").isalnum():
+                raise ValueError(
+                    "id must contain only alphanumeric characters and hyphens"
+                )
+
+            # Must not start or end with a hyphen
+            if v.startswith("-") or v.endswith("-"):
+                raise ValueError("id must not start or end with a hyphen")
+
+        return v
+
     @field_validator("tags")
     @classmethod
     def validate_tags(cls, v: list[str]) -> list[str]:
@@ -322,6 +355,18 @@ class FlowMetadata(BaseModel):
     def update_timestamp(self) -> None:
         """Update the updated_at timestamp."""
         self.updated_at = datetime.now().isoformat()
+
+    @model_validator(mode="after")
+    def ensure_id(self) -> "FlowMetadata":
+        """Ensure id is set.
+
+        Note: YAML persistence is handled by Flow.from_yaml() and FlowRegistry
+        to maintain proper separation of concerns.
+        """
+        if not self.id and self.name:
+            self.id = get_flow_identifier(self.name)
+
+        return self
 
     def get_best_model(
         self, available_models: Optional[list[str]] = None

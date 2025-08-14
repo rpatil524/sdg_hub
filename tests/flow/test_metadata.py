@@ -419,3 +419,46 @@ class TestFlowMetadata:
         assert metadata.dataset_requirements is not None
         assert metadata.dataset_requirements.required_columns == ["text"]
         assert metadata.dataset_requirements.min_samples == 5
+
+    def test_id_generation(self):
+        """Test automatic id generation from name."""
+        metadata = FlowMetadata(name="My Complex Flow Name", description="Test flow")
+        assert metadata.id is not None
+
+    def test_id_validation(self):
+        """Test id validation with random flow ids."""
+        # Test custom id is preserved
+        metadata = FlowMetadata(name="My Flow", id="custom-id", description="Test flow")
+        assert metadata.id == "custom-id"
+
+        # Test that a random id is generated if not provided
+        metadata2 = FlowMetadata(name="Another Flow", description="Test flow")
+        assert metadata2.id is not None
+        assert isinstance(metadata2.id, str)
+        assert metadata2.id != ""  # Should not be empty
+
+        # Test invalid id characters (should fail lowercase check first)
+        with pytest.raises(ValidationError) as exc_info:
+            FlowMetadata(
+                name="My Flow",
+                id="Invalid ID!",  # Contains invalid characters and uppercase
+                description="Test flow",
+            )
+        # The error message should mention lowercase requirement
+        assert "id must be lowercase" in str(exc_info.value)
+
+        # Test uppercase id
+        with pytest.raises(ValidationError) as exc_info:
+            FlowMetadata(name="My Flow", id="INVALID-CASE", description="Test flow")
+        assert "id must be lowercase" in str(exc_info.value)
+
+        # Test valid lowercase but invalid characters
+        with pytest.raises(ValidationError) as exc_info:
+            FlowMetadata(
+                name="My Flow",
+                id="invalid id!",  # Lowercase but contains space and exclamation
+                description="Test flow",
+            )
+        assert "id must contain only alphanumeric characters and hyphens" in str(
+            exc_info.value
+        )

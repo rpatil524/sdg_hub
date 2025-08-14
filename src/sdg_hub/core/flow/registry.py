@@ -4,14 +4,17 @@
 # Standard
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional
 import os
 
 # Third Party
+from rich.console import Console
+from rich.table import Table
 import yaml
 
 # Local
 from ..utils.logger_config import setup_logger
+from ..utils.yaml_utils import save_flow_yaml
 from .metadata import FlowMetadata
 
 logger = setup_logger(__name__)
@@ -124,22 +127,36 @@ class FlowRegistry:
                     metadata_dict = flow_config["metadata"]
                     metadata = FlowMetadata(**metadata_dict)
 
-                    entry = FlowRegistryEntry(path=str(yaml_file), metadata=metadata)
+                    # If id was generated, update the YAML
+                    if metadata.id and "id" not in metadata_dict:
+                        flow_config["metadata"]["id"] = metadata.id
 
+                        save_flow_yaml(
+                            yaml_file,
+                            flow_config,
+                            f"updated with generated id: {metadata.id}",
+                        )
+
+                    entry = FlowRegistryEntry(path=str(yaml_file), metadata=metadata)
                     cls._entries[metadata.name] = entry
-                    logger.debug(f"Registered flow: {metadata.name} from {yaml_file}")
+                    logger.debug(
+                        f"Registered flow: {metadata.name} (id: {metadata.id}) from {yaml_file}"
+                    )
 
             except Exception as exc:
                 logger.debug(f"Skipped {yaml_file}: {exc}")
 
     @classmethod
-    def get_flow_path(cls, flow_name: str) -> Optional[str]:
+    def get_flow_path(cls, flow_name_or_id: str) -> Optional[str]:
         """Get the path to a registered flow.
+
+        For backward compatibility, this function accepts either a flow id or flow_name.
+        Flow ID is preferred and should be used in new code.
 
         Parameters
         ----------
-        flow_name : str
-            Name of the flow to find.
+        flow_name_or_id : str
+            Either the flow id or flow_name to find.
 
         Returns
         -------
@@ -149,9 +166,63 @@ class FlowRegistry:
         cls._ensure_initialized()
         cls._discover_flows()
 
-        if flow_name in cls._entries:
-            return cls._entries[flow_name].path
+        # First try to find by id (preferred)
+        for entry in cls._entries.values():
+            if entry.metadata.id == flow_name_or_id:
+                return entry.path
+
+        # If not found, try by name (backward compatibility)
+        for entry in cls._entries.values():
+            if entry.metadata.name == flow_name_or_id:
+                logger.debug(
+                    f"Found flow by name (deprecated): {flow_name_or_id}, use id: {entry.metadata.id} instead"
+                )
+                return entry.path
+
         return None
+
+    @classmethod
+    def get_flow_path_safe(cls, flow_name_or_id: str) -> str:
+        """Get the path to a registered flow with better error handling.
+
+        For backward compatibility, this function accepts either a flow id or flow_name.
+        Flow ID is preferred and should be used in new code.
+
+        Parameters
+        ----------
+        flow_name_or_id : str
+            Either the flow id or flow_name to find.
+
+        Returns
+        -------
+        str
+            Path to the flow file.
+
+        Raises
+        ------
+        ValueError
+            If the flow is not found, with helpful suggestions.
+        """
+        cls._ensure_initialized()
+        cls._discover_flows()
+
+        path = cls.get_flow_path(flow_name_or_id)
+        if path is None:
+            # Get available flows for better error message
+            available_flows = cls.list_flows()
+
+            error_msg = f"Flow '{flow_name_or_id}' not found.\n"
+
+            if available_flows:
+                error_msg += "Available flows:\n"
+                for flow in available_flows:
+                    error_msg += f"  - ID: '{flow['id']}', Name: '{flow['name']}'\n"
+            else:
+                error_msg += "No flows are currently registered. Try running FlowRegistry.discover_flows() first."
+
+            raise ValueError(error_msg.strip())
+
+        return path
 
     @classmethod
     def get_flow_metadata(cls, flow_name: str) -> Optional[FlowMetadata]:
@@ -175,22 +246,26 @@ class FlowRegistry:
         return None
 
     @classmethod
-    def list_flows(cls) -> list[str]:
-        """List all registered flow names.
+    def list_flows(cls) -> List[Dict[str, str]]:
+        """List all registered flows with their IDs.
 
         Returns
         -------
-        List[str]
-            List of flow names.
+        List[Dict[str, str]]
+            List of dictionaries containing flow IDs and names.
+            Each dictionary has 'id' and 'name' keys.
         """
         cls._ensure_initialized()
         cls._discover_flows()
-        return list(cls._entries.keys())
+        return [
+            {"id": entry.metadata.id, "name": entry.metadata.name}
+            for entry in cls._entries.values()
+        ]
 
     @classmethod
     def search_flows(
         cls, tag: Optional[str] = None, author: Optional[str] = None
-    ) -> list[str]:
+    ) -> List[Dict[str, str]]:
         """Search flows by criteria.
 
         Parameters
@@ -202,15 +277,17 @@ class FlowRegistry:
 
         Returns
         -------
-        List[str]
-            List of matching flow names.
+        List[Dict[str, str]]
+            List of matching flows. Each dictionary contains:
+            - id: Flow ID
+            - name: Flow name
         """
         cls._ensure_initialized()
         cls._discover_flows()
 
         matching_flows = []
 
-        for name, entry in cls._entries.items():
+        for entry in cls._entries.values():
             metadata = entry.metadata
 
             # Filter by tag
@@ -221,25 +298,27 @@ class FlowRegistry:
             if author and author.lower() not in metadata.author.lower():
                 continue
 
-            matching_flows.append(name)
+            matching_flows.append({"id": metadata.id, "name": metadata.name})
 
         return matching_flows
 
     @classmethod
-    def get_flows_by_category(cls) -> dict[str, list[str]]:
+    def get_flows_by_category(cls) -> Dict[str, List[Dict[str, str]]]:
         """Get flows organized by their primary tag.
 
         Returns
         -------
-        Dict[str, List[str]]
-            Dictionary mapping tags to flow names.
+        Dict[str, List[Dict[str, str]]]
+            Dictionary mapping tags to flow information. Each flow is represented by:
+            - id: Flow ID
+            - name: Flow name
         """
         cls._ensure_initialized()
         cls._discover_flows()
 
         categories = {}
 
-        for name, entry in cls._entries.items():
+        for entry in cls._entries.values():
             metadata = entry.metadata
 
             # Use first tag as primary category, or "uncategorized"
@@ -248,21 +327,16 @@ class FlowRegistry:
             if category not in categories:
                 categories[category] = []
 
-            categories[category].append(name)
+            categories[category].append({"id": metadata.id, "name": metadata.name})
 
         return categories
 
     @classmethod
-    def discover_flows(cls, show_all_columns: bool = False) -> None:
+    def discover_flows(cls) -> None:
         """Discover and display all flows in a formatted table.
 
         This is the main public API for flow discovery. It finds all flows
         in registered search paths and displays them in a beautiful Rich table.
-
-        Parameters
-        ----------
-        show_all_columns : bool, optional
-            Whether to show extended table with all columns, by default False
         """
         cls._ensure_initialized()
         cls._discover_flows()
@@ -276,11 +350,12 @@ class FlowRegistry:
 
         # Prepare data with fallbacks
         flow_data = []
-        for name, entry in cls._entries.items():
+        for _, entry in cls._entries.items():
             metadata = entry.metadata
             flow_data.append(
                 {
-                    "name": name,
+                    "name": metadata.name,
+                    "id": metadata.id,
                     "author": metadata.author or "Unknown",
                     "tags": ", ".join(metadata.tags) if metadata.tags else "-",
                     "description": metadata.description or "No description",
@@ -290,41 +365,29 @@ class FlowRegistry:
             )
 
         # Sort by name for consistency
-        flow_data.sort(key=lambda x: x["name"])
+        flow_data.sort(key=lambda x: x["id"])
 
         # Display Rich table
         # Third Party
-        from rich.console import Console
-        from rich.table import Table
 
         console = Console()
-        table = Table(show_header=True, header_style="bold magenta")
+        table = Table(show_header=True, header_style="bold bright_magenta")
 
-        # Add columns
-        table.add_column("Name", style="cyan", no_wrap=True)
-        table.add_column("Author", style="green")
-
-        if show_all_columns:
-            table.add_column("Version", style="blue")
-            table.add_column("Cost", style="yellow")
-
-        table.add_column("Tags", style="dim")
-        table.add_column("Description")
+        # Add columns with better visibility colors
+        table.add_column("ID", style="bold bright_magenta", no_wrap=True)
+        table.add_column("Name", style="bold bright_cyan")
+        table.add_column("Author", style="bright_green")
+        table.add_column("Tags", style="yellow")
+        table.add_column("Description", style="white")
 
         # Add rows
         for flow in flow_data:
-            if show_all_columns:
-                table.add_row(
-                    flow["name"],
-                    flow["author"],
-                    flow["version"],
-                    flow["cost"],
-                    flow["tags"],
-                    flow["description"],
-                )
-            else:
-                table.add_row(
-                    flow["name"], flow["author"], flow["tags"], flow["description"]
-                )
+            table.add_row(
+                flow["id"],
+                flow["name"],
+                flow["author"],
+                flow["tags"],
+                flow["description"],
+            )
 
         console.print(table)

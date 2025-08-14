@@ -112,6 +112,18 @@ class FlowValidator:
         elif not isinstance(metadata["name"], str) or not metadata["name"].strip():
             errors.append("Metadata 'name' must be a non-empty string")
 
+        # Validate id if present
+        if "id" in metadata:
+            flow_id = metadata["id"]
+            if not isinstance(flow_id, str):
+                errors.append("Metadata: 'id' must be a string")
+            elif flow_id and not flow_id.islower():
+                errors.append("Metadata: 'id' must be lowercase")
+            elif flow_id and not flow_id.replace("-", "").isalnum():
+                errors.append(
+                    "Metadata: 'id' must contain only alphanumeric characters and hyphens"
+                )
+
         # Validate optional fields
         string_fields = [
             "description",

@@ -114,7 +114,10 @@ class FlowMigration:
     @staticmethod
     def _generate_default_metadata(flow_name: str) -> dict[str, Any]:
         """Generate default metadata for migrated flows."""
-        return {
+        # Import here to avoid circular import
+        from ..utils.flow_identifier import get_flow_identifier
+
+        metadata = {
             "name": flow_name,
             "description": f"Migrated flow: {flow_name}",
             "version": "1.0.0",
@@ -126,6 +129,14 @@ class FlowMigration:
                 "experimental": [],
             },
         }
+
+        # Generate id for migrated flows
+        flow_id = get_flow_identifier(flow_name)
+        if flow_id:
+            metadata["id"] = flow_id
+            logger.debug(f"Generated id for migrated flow: {flow_id}")
+
+        return metadata
 
     @staticmethod
     def _migrate_block_config(

@@ -218,6 +218,8 @@ class TestFlowMigration:
         assert "migrated" in metadata["tags"]
         assert "recommended_models" in metadata
         assert len(metadata["recommended_models"]) > 0
+        # Check id generation
+        assert metadata["id"] is not None
 
     def test_migrate_block_config_edge_cases(self):
         """Test edge cases in block config migration."""
@@ -261,13 +263,94 @@ class TestFlowMigrationIntegration:
             temp_path = f.name
 
         try:
-            # Should successfully load old format
-            flow = Flow.from_yaml(temp_path)
+            # First load - should migrate and generate id
+            flow1 = Flow.from_yaml(temp_path)
+            assert flow1.metadata.name == Path(temp_path).stem
+            assert "migrated" in flow1.metadata.tags
+            assert len(flow1.blocks) == 1
+            assert flow1.blocks[0].block_name == "test_duplicate"
+            first_id = flow1.metadata.id
+            assert first_id  # Should have generated an ID
 
-            assert flow.metadata.name == Path(temp_path).stem
-            assert "migrated" in flow.metadata.tags
-            assert len(flow.blocks) == 1
-            assert flow.blocks[0].block_name == "test_duplicate"
+            # Verify id was saved to YAML during migration
+            with open(temp_path, "r") as f:
+                migrated_config = yaml.safe_load(f)
+                assert "metadata" in migrated_config
+                assert "id" in migrated_config["metadata"]
+                assert migrated_config["metadata"]["id"] == first_id
+
+            # Load again - should use same id since it's now in new format
+            flow2 = Flow.from_yaml(temp_path)
+            assert flow2.metadata.id == first_id  # Should use same ID
+
+            # Create another old format flow - should get different ID when migrated
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".yaml", delete=False
+            ) as f2:
+                yaml.dump(old_flow_config, f2)
+                temp_path2 = f2.name
+
+            try:
+                # When migrated, should get different ID
+                flow3 = Flow.from_yaml(temp_path2)
+                assert flow3.metadata.id != first_id  # Should get different ID
+
+                # Verify the new ID was saved to YAML during migration
+                with open(temp_path2, "r") as f:
+                    migrated_config2 = yaml.safe_load(f)
+                    assert "metadata" in migrated_config2
+                    assert "id" in migrated_config2["metadata"]
+                    assert migrated_config2["metadata"]["id"] == flow3.metadata.id
+            finally:
+                Path(temp_path2).unlink()
+
+            # Create two identical old format flows to verify they get different IDs when migrated
+            old_config = [
+                {
+                    "block_type": "DuplicateColumns",
+                    "block_config": {
+                        "block_name": "test_duplicate2",
+                        "columns_map": {"input": "output"},
+                    },
+                }
+            ]
+
+            # Create first temp file
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".yaml", delete=False
+            ) as f2:
+                yaml.dump(old_config, f2)
+                temp_path2 = f2.name
+
+            # Create second temp file with same content
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".yaml", delete=False
+            ) as f3:
+                yaml.dump(old_config, f3)
+                temp_path3 = f3.name
+
+            try:
+                # Load both files - should get different IDs since they're separate migrations
+                flow3 = Flow.from_yaml(temp_path2)
+                id1 = flow3.metadata.id
+
+                flow4 = Flow.from_yaml(temp_path3)
+                id2 = flow4.metadata.id
+
+                assert id1 != id2  # Should get different IDs for different files
+
+                # Verify both IDs were saved to their respective YAMLs
+                with open(temp_path2, "r") as f:
+                    config2 = yaml.safe_load(f)
+                    assert config2["metadata"]["id"] == id1
+
+                with open(temp_path3, "r") as f:
+                    config3 = yaml.safe_load(f)
+                    assert config3["metadata"]["id"] == id2
+
+            finally:
+                Path(temp_path2).unlink()
+                Path(temp_path3).unlink()
 
         finally:
             Path(temp_path).unlink()
