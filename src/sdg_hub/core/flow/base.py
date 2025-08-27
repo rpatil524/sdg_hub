@@ -306,13 +306,11 @@ class Flow(BaseModel):
 
         # Get block class from registry
         try:
-            block_class = BlockRegistry.get(block_type_name)
+            block_class = BlockRegistry._get(block_type_name)
         except KeyError as exc:
             # Get all available blocks from all categories
-            all_blocks = BlockRegistry.all()
-            available_blocks = ", ".join(
-                [block for blocks in all_blocks.values() for block in blocks]
-            )
+            all_blocks = BlockRegistry.list_blocks()
+            available_blocks = ", ".join(all_blocks)
             raise FlowValidationError(
                 f"Block type '{block_type_name}' not found in registry. "
                 f"Available blocks: {available_blocks}"
