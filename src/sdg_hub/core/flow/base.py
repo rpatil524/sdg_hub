@@ -19,7 +19,7 @@ import yaml
 # Local
 from ..blocks.base import BaseBlock
 from ..blocks.registry import BlockRegistry
-from ..utils.datautils import safe_concatenate_with_validation
+from ..utils.datautils import safe_concatenate_with_validation, validate_no_duplicates
 from ..utils.error_handling import EmptyDatasetError, FlowValidationError
 from ..utils.logger_config import setup_logger
 from ..utils.path_resolution import resolve_path
@@ -402,6 +402,8 @@ class Flow(BaseModel):
 
         if len(dataset) == 0:
             raise EmptyDatasetError("Input dataset is empty")
+
+        validate_no_duplicates(dataset)
 
         # Check if model configuration has been set for flows with LLM blocks
         llm_blocks = self._detect_llm_blocks()
@@ -897,6 +899,8 @@ class Flow(BaseModel):
 
         if len(dataset) == 0:
             raise EmptyDatasetError("Input dataset is empty")
+
+        validate_no_duplicates(dataset)
 
         # Use smaller sample size if dataset is smaller
         actual_sample_size = min(sample_size, len(dataset))
