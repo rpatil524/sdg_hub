@@ -356,6 +356,7 @@ class Flow(BaseModel):
         runtime_params: Optional[dict[str, dict[str, Any]]] = None,
         checkpoint_dir: Optional[str] = None,
         save_freq: Optional[int] = None,
+        max_concurrency: Optional[int] = None,
     ) -> Dataset:
         """Execute the flow blocks in sequence to generate data.
 
@@ -377,6 +378,9 @@ class Flow(BaseModel):
         save_freq : Optional[int], optional
             Number of completed samples after which to save a checkpoint.
             If None, only saves final results when checkpointing is enabled.
+        max_concurrency : Optional[int], optional
+            Maximum number of concurrent requests across all blocks.
+            Controls async request concurrency to prevent overwhelming servers.
 
         Returns
         -------
@@ -395,6 +399,20 @@ class Flow(BaseModel):
             raise FlowValidationError(
                 f"save_freq must be greater than 0, got {save_freq}"
             )
+
+        # Validate max_concurrency parameter
+        if max_concurrency is not None:
+            # Explicitly reject boolean values (bool is a subclass of int in Python)
+            if isinstance(max_concurrency, bool) or not isinstance(
+                max_concurrency, int
+            ):
+                raise FlowValidationError(
+                    f"max_concurrency must be an int, got {type(max_concurrency).__name__}"
+                )
+            if max_concurrency <= 0:
+                raise FlowValidationError(
+                    f"max_concurrency must be greater than 0, got {max_concurrency}"
+                )
 
         # Validate preconditions
         if not self.blocks:
@@ -421,6 +439,10 @@ class Flow(BaseModel):
                 "Dataset validation failed:\n" + "\n".join(dataset_errors)
             )
 
+        # Log concurrency control if specified
+        if max_concurrency is not None:
+            logger.info(f"Using max_concurrency={max_concurrency} for LLM requests")
+
         # Initialize checkpointer if enabled
         checkpointer = None
         completed_dataset = None
@@ -446,6 +468,7 @@ class Flow(BaseModel):
         logger.info(
             f"Starting flow '{self.metadata.name}' v{self.metadata.version} "
             f"with {len(dataset)} samples across {len(self.blocks)} blocks"
+            + (f" (max_concurrency={max_concurrency})" if max_concurrency else "")
         )
 
         # Merge migrated runtime params with provided ones (provided ones take precedence)
@@ -469,7 +492,7 @@ class Flow(BaseModel):
 
                 # Execute all blocks on this chunk
                 processed_chunk = self._execute_blocks_on_dataset(
-                    chunk_dataset, runtime_params
+                    chunk_dataset, runtime_params, max_concurrency
                 )
                 all_processed.append(processed_chunk)
 
@@ -493,7 +516,9 @@ class Flow(BaseModel):
 
         else:
             # Process entire dataset at once
-            final_dataset = self._execute_blocks_on_dataset(dataset, runtime_params)
+            final_dataset = self._execute_blocks_on_dataset(
+                dataset, runtime_params, max_concurrency
+            )
 
             # Save final checkpoint if checkpointing enabled
             if checkpointer:
@@ -516,7 +541,10 @@ class Flow(BaseModel):
         return final_dataset
 
     def _execute_blocks_on_dataset(
-        self, dataset: Dataset, runtime_params: dict[str, dict[str, Any]]
+        self,
+        dataset: Dataset,
+        runtime_params: dict[str, dict[str, Any]],
+        max_concurrency: Optional[int] = None,
     ) -> Dataset:
         """Execute all blocks in sequence on the given dataset.
 
@@ -526,6 +554,8 @@ class Flow(BaseModel):
             Dataset to process through all blocks.
         runtime_params : Dict[str, Dict[str, Any]]
             Runtime parameters for block execution.
+        max_concurrency : Optional[int], optional
+            Maximum concurrency for LLM requests across blocks.
 
         Returns
         -------
@@ -543,6 +573,10 @@ class Flow(BaseModel):
 
             # Prepare block execution parameters
             block_kwargs = self._prepare_block_kwargs(block, runtime_params)
+
+            # Add max_concurrency to block kwargs if provided
+            if max_concurrency is not None:
+                block_kwargs["_flow_max_concurrency"] = max_concurrency
 
             try:
                 # Check if this is a deprecated block and skip validations
