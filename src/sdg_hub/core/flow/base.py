@@ -10,7 +10,14 @@ import uuid
 
 # Third Party
 from datasets import Dataset
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    field_validator,
+    model_validator,
+)
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -23,6 +30,7 @@ from ..blocks.base import BaseBlock
 from ..blocks.registry import BlockRegistry
 from ..utils.datautils import safe_concatenate_with_validation, validate_no_duplicates
 from ..utils.error_handling import EmptyDatasetError, FlowValidationError
+from ..utils.flow_metrics import display_metrics_summary, save_metrics_to_json
 from ..utils.logger_config import setup_logger
 from ..utils.path_resolution import resolve_path
 from ..utils.yaml_utils import save_flow_yaml
@@ -69,6 +77,9 @@ class Flow(BaseModel):
     _migrated_runtime_params: dict[str, dict[str, Any]] = {}
     _llm_client: Any = None  # Only used for backward compatibility with old YAMLs
     _model_config_set: bool = False  # Track if model configuration has been set
+    _block_metrics: list[dict[str, Any]] = PrivateAttr(
+        default_factory=list
+    )  # Track block execution metrics
 
     @field_validator("blocks")
     @classmethod
@@ -507,72 +518,121 @@ class Flow(BaseModel):
             + (f" (max_concurrency={max_concurrency})" if max_concurrency else "")
         )
 
+        # Reset metrics for this execution
+        self._block_metrics = []
+        run_start = time.perf_counter()
+
         # Merge migrated runtime params with provided ones (provided ones take precedence)
         merged_runtime_params = self._migrated_runtime_params.copy()
         if runtime_params:
             merged_runtime_params.update(runtime_params)
         runtime_params = merged_runtime_params
 
-        # Process dataset in chunks if checkpointing with save_freq
-        if checkpointer and save_freq:
-            all_processed = []
+        # Execute flow with metrics capture, ensuring metrics are always displayed/saved
+        final_dataset = None
+        execution_successful = False
 
-            # Process in chunks of save_freq
-            for i in range(0, len(dataset), save_freq):
-                chunk_end = min(i + save_freq, len(dataset))
-                chunk_dataset = dataset.select(range(i, chunk_end))
+        try:
+            # Process dataset in chunks if checkpointing with save_freq
+            if checkpointer and save_freq:
+                all_processed = []
 
-                flow_logger.info(
-                    f"Processing chunk {i // save_freq + 1}: samples {i} to {chunk_end - 1}"
-                )
+                # Process in chunks of save_freq
+                for i in range(0, len(dataset), save_freq):
+                    chunk_end = min(i + save_freq, len(dataset))
+                    chunk_dataset = dataset.select(range(i, chunk_end))
 
-                # Execute all blocks on this chunk
-                processed_chunk = self._execute_blocks_on_dataset(
-                    chunk_dataset, runtime_params, flow_logger, max_concurrency
-                )
-                all_processed.append(processed_chunk)
+                    flow_logger.info(
+                        f"Processing chunk {i // save_freq + 1}: samples {i} to {chunk_end - 1}"
+                    )
 
-                # Save checkpoint after chunk completion
-                checkpointer.add_completed_samples(processed_chunk)
+                    # Execute all blocks on this chunk
+                    processed_chunk = self._execute_blocks_on_dataset(
+                        chunk_dataset, runtime_params, flow_logger, max_concurrency
+                    )
+                    all_processed.append(processed_chunk)
 
-            # Save final checkpoint for any remaining samples
-            checkpointer.save_final_checkpoint()
+                    # Save checkpoint after chunk completion
+                    checkpointer.add_completed_samples(processed_chunk)
 
-            # Combine all processed chunks
-            final_dataset = safe_concatenate_with_validation(
-                all_processed, "processed chunks from flow execution"
-            )
-
-            # Combine with previously completed samples if any
-            if checkpointer and completed_dataset:
-                final_dataset = safe_concatenate_with_validation(
-                    [completed_dataset, final_dataset],
-                    "completed checkpoint data with newly processed data",
-                )
-
-        else:
-            # Process entire dataset at once
-            final_dataset = self._execute_blocks_on_dataset(
-                dataset, runtime_params, flow_logger, max_concurrency
-            )
-
-            # Save final checkpoint if checkpointing enabled
-            if checkpointer:
-                checkpointer.add_completed_samples(final_dataset)
+                # Save final checkpoint for any remaining samples
                 checkpointer.save_final_checkpoint()
 
+                # Combine all processed chunks
+                final_dataset = safe_concatenate_with_validation(
+                    all_processed, "processed chunks from flow execution"
+                )
+
                 # Combine with previously completed samples if any
-                if completed_dataset:
+                if checkpointer and completed_dataset:
                     final_dataset = safe_concatenate_with_validation(
                         [completed_dataset, final_dataset],
                         "completed checkpoint data with newly processed data",
                     )
 
-        flow_logger.info(
-            f"Flow '{self.metadata.name}' completed successfully: "
-            f"{len(final_dataset)} final samples, "
-            f"{len(final_dataset.column_names)} final columns"
-        )
+            else:
+                # Process entire dataset at once
+                final_dataset = self._execute_blocks_on_dataset(
+                    dataset, runtime_params, flow_logger, max_concurrency
+                )
+
+                # Save final checkpoint if checkpointing enabled
+                if checkpointer:
+                    checkpointer.add_completed_samples(final_dataset)
+                    checkpointer.save_final_checkpoint()
+
+                    # Combine with previously completed samples if any
+                    if completed_dataset:
+                        final_dataset = safe_concatenate_with_validation(
+                            [completed_dataset, final_dataset],
+                            "completed checkpoint data with newly processed data",
+                        )
+
+            execution_successful = True
+
+        finally:
+            # Always display metrics and save JSON, even if execution failed
+            display_metrics_summary(
+                self._block_metrics, self.metadata.name, final_dataset
+            )
+
+            # Save metrics to JSON if log_dir is provided
+            if log_dir is not None:
+                # Ensure necessary variables exist
+                if "timestamp" not in locals() or "flow_name" not in locals():
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    flow_name = self.metadata.name.replace(" ", "_").lower()
+
+                save_metrics_to_json(
+                    self._block_metrics,
+                    self.metadata.name,
+                    self.metadata.version,
+                    execution_successful,
+                    run_start,
+                    log_dir,
+                    timestamp,
+                    flow_name,
+                    flow_logger,
+                )
+
+        # Keep a basic log entry for file logs (only if execution was successful)
+        if execution_successful and final_dataset is not None:
+            flow_logger.info(
+                f"Flow '{self.metadata.name}' completed successfully: "
+                f"{len(final_dataset)} final samples, "
+                f"{len(final_dataset.column_names)} final columns"
+            )
+
+        # Close file handlers if we opened a flow-specific logger
+        if log_dir is not None and flow_logger is not logger:
+            for h in list(getattr(flow_logger, "handlers", [])):
+                try:
+                    h.flush()
+                    h.close()
+                except Exception:
+                    pass
+                finally:
+                    flow_logger.removeHandler(h)
 
         return final_dataset
 
@@ -619,6 +679,11 @@ class Flow(BaseModel):
             if max_concurrency is not None:
                 block_kwargs["_flow_max_concurrency"] = max_concurrency
 
+            # Capture metrics before execution
+            start_time = time.perf_counter()
+            input_rows = len(current_dataset)
+            input_cols = set(current_dataset.column_names)
+
             try:
                 # Check if this is a deprecated block and skip validations
                 is_deprecated_block = (
@@ -643,6 +708,27 @@ class Flow(BaseModel):
                         f"Block '{block.block_name}' produced empty dataset"
                     )
 
+                # Capture metrics after successful execution
+                execution_time = time.perf_counter() - start_time
+                output_rows = len(current_dataset)
+                output_cols = set(current_dataset.column_names)
+                added_cols = output_cols - input_cols
+                removed_cols = input_cols - output_cols
+
+                # Store block metrics
+                self._block_metrics.append(
+                    {
+                        "block_name": block.block_name,
+                        "block_type": block.__class__.__name__,
+                        "execution_time": execution_time,
+                        "input_rows": input_rows,
+                        "output_rows": output_rows,
+                        "added_cols": list(added_cols),
+                        "removed_cols": list(removed_cols),
+                        "status": "success",
+                    }
+                )
+
                 exec_logger.info(
                     f"Block '{block.block_name}' completed successfully: "
                     f"{len(current_dataset)} samples, "
@@ -650,6 +736,22 @@ class Flow(BaseModel):
                 )
 
             except Exception as exc:
+                # Capture metrics for failed execution
+                execution_time = time.perf_counter() - start_time
+                self._block_metrics.append(
+                    {
+                        "block_name": block.block_name,
+                        "block_type": block.__class__.__name__,
+                        "execution_time": execution_time,
+                        "input_rows": input_rows,
+                        "output_rows": 0,
+                        "added_cols": [],
+                        "removed_cols": [],
+                        "status": "failed",
+                        "error": str(exc),
+                    }
+                )
+
                 exec_logger.error(
                     f"Block '{block.block_name}' failed during execution: {exc}"
                 )
@@ -1001,7 +1103,7 @@ class Flow(BaseModel):
             "execution_time_seconds": 0,
         }
 
-        start_time = time.time()
+        start_time = time.perf_counter()
 
         try:
             # Execute the flow with sample data
@@ -1009,7 +1111,7 @@ class Flow(BaseModel):
             runtime_params = runtime_params or {}
 
             for i, block in enumerate(self.blocks):
-                block_start_time = time.time()
+                block_start_time = time.perf_counter()
                 input_rows = len(current_dataset)
 
                 logger.info(
@@ -1068,7 +1170,7 @@ class Flow(BaseModel):
                 else {},
             }
 
-            execution_time = time.time() - start_time
+            execution_time = time.perf_counter() - start_time
             dry_run_results["execution_time_seconds"] = execution_time
 
             logger.info(
@@ -1079,7 +1181,7 @@ class Flow(BaseModel):
             return dry_run_results
 
         except Exception as exc:
-            execution_time = time.time() - start_time
+            execution_time = time.perf_counter() - start_time
             dry_run_results["execution_successful"] = False
             dry_run_results["execution_time_seconds"] = execution_time
             dry_run_results["error"] = str(exc)
