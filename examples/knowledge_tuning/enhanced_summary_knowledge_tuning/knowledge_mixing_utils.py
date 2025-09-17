@@ -128,6 +128,21 @@ def _create_messages_with_reasoning(record: dict) -> List[dict]:
         }
     ]
 
+def _create_messages_with_reasoning_no_document(record: dict) -> List[dict]:
+    """Create message structure with reasoning."""
+    return [
+        {
+            "role": "user", 
+            "content": f"In {record['document_outline']}, {record['question']}",
+            "thinking": None
+        },
+        {
+            "role": "assistant", 
+            "content": record['response'], 
+            "thinking": record['reasoning']
+        }
+    ]
+
 
 def _create_messages_without_reasoning(record: dict) -> List[dict]:
     """Create message structure without reasoning."""
@@ -143,11 +158,25 @@ def _create_messages_without_reasoning(record: dict) -> List[dict]:
     ]
 
 
+def _create_messages_without_reasoning_no_document(record: dict) -> List[dict]:
+    """Create message structure without reasoning."""
+    return [
+        {
+            "role": "user", 
+            "content": f"In {record['document_outline']}, {record['question']}"
+        },
+        {
+            "role": "assistant", 
+            "content": record['response']
+        }
+    ]
+
 def generate_knowledge_qa_dataset(
     generated_dataset: pl.DataFrame,
     keep_columns: Optional[List[str]] = None,
     pre_training: bool = False,
-    dataset_name: str = "document_knowledge_qa"
+    dataset_name: str = "document_knowledge_qa",
+    keep_document_in_context: bool = False
 ) -> pl.DataFrame:
     """
     Generate knowledge Q&A dataset in chat format.
@@ -179,15 +208,26 @@ def generate_knowledge_qa_dataset(
     # Handle reasoning column
     has_reasoning = 'reasoning' in generated_dataset.columns
     
-    if has_reasoning:
+    # TODO: Fix the name of reasoning column, test with reasoning model
+    if has_reasoning and not keep_document_in_context:
         message_columns = ['question', 'response', 'document', 'document_outline', 'reasoning']
         messages_expr = pl.struct(message_columns).map_elements(
             _create_messages_with_reasoning
         ).alias("messages")
-    else:
+    elif has_reasoning and keep_document_in_context:
+        message_columns = ['question', 'response', 'document', 'document_outline', 'reasoning']
+        messages_expr = pl.struct(message_columns).map_elements(
+            _create_messages_with_reasoning_no_document
+        ).alias("messages")
+    elif keep_document_in_context:
         message_columns = ['question', 'response', 'document', 'document_outline']
         messages_expr = pl.struct(message_columns).map_elements(
             _create_messages_without_reasoning
+        ).alias("messages")
+    else:
+        message_columns = ['question', 'response', 'document', 'document_outline']
+        messages_expr = pl.struct(message_columns).map_elements(
+            _create_messages_without_reasoning_no_document
         ).alias("messages")
     
     base_columns.append(messages_expr)
@@ -198,11 +238,14 @@ def generate_knowledge_qa_dataset(
     # Select final columns
     final_columns = keep_columns + ["messages", "metadata"]
     knowledge_ds = knowledge_ds.select(final_columns)
-    
     # Add unmask column for pre-training if needed
     if pre_training:
         knowledge_ds = knowledge_ds.with_columns(
             pl.lit(True).alias("unmask")
+        )
+    else:
+        knowledge_ds = knowledge_ds.with_columns(
+            pl.lit(False).alias("unmask")
         )
     
     return knowledge_ds
