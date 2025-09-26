@@ -877,15 +877,18 @@ class Flow(BaseModel):
                             f"Block '{block.block_name}': {param_name} "
                             f"'{old_value}' -> '{param_value}'"
                         )
+                    ## check if allow extra
+                    elif block.model_config["extra"] == "allow":
+                        setattr(block, param_name, param_value)
+                        logger.debug(
+                            f"Block '{block.block_name}': {param_name} "
+                            f"'{old_value}' -> '{param_value}'"
+                        )
                     else:
                         logger.warning(
                             f"Block '{block.block_name}' ({block.__class__.__name__}) "
                             f"does not have attribute '{param_name}' - skipping"
                         )
-
-                # Reinitialize client manager for LLM blocks after updating config
-                if hasattr(block, "_reinitialize_client_manager"):
-                    block._reinitialize_client_manager()
 
                 modified_count += 1
 

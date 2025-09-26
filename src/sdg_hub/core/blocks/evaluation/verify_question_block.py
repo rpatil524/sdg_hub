@@ -103,12 +103,6 @@ class VerifyQuestionBlock(BaseBlock):
         description="Regex pattern for custom parsing. If provided, takes precedence over tag-based parsing",
     )
 
-    # Store parameters for internal blocks
-    prompt_params: dict[str, Any] = Field(default_factory=dict, exclude=True)
-    llm_params: dict[str, Any] = Field(default_factory=dict, exclude=True)
-    parser_params: dict[str, Any] = Field(default_factory=dict, exclude=True)
-    filter_params: dict[str, Any] = Field(default_factory=dict, exclude=True)
-
     # --- Internal blocks (composition) ---
     prompt_builder: PromptBuilderBlock = Field(None, exclude=True)  # type: ignore
     llm_chat: LLMChatBlock = Field(None, exclude=True)  # type: ignore
@@ -147,31 +141,45 @@ class VerifyQuestionBlock(BaseBlock):
                 f"Initialized VerifyQuestionBlock '{self.block_name}' with model '{self.model}'"
             )
 
-    def _extract_params(self, kwargs: dict, block_class) -> dict:
-        """Extract parameters for specific block class based on its model_fields."""
-        # Exclude parameters that are handled by this wrapper's structure
-        wrapper_params = {
-            "block_name",
-            "input_cols",
-            "output_cols",
-        }
+    def _get_wrapper_params(self) -> set[str]:
+        """Get parameters that are handled by this wrapper's structure."""
+        return {"block_name", "input_cols", "output_cols"}
 
-        # Extract parameters that the target block accepts
-        params = {
-            k: v
-            for k, v in kwargs.items()
-            if k in block_class.model_fields and k not in wrapper_params
-        }
-
-        # Also include declared fields from this composite block that the target block accepts
+    def _add_composite_fields(
+        self, params: dict, block_class, wrapper_params: set[str]
+    ) -> dict:
+        """Add declared fields from this composite block to parameters."""
         for field_name in self.__class__.model_fields:
-            if (
-                field_name in block_class.model_fields
-                and field_name not in wrapper_params
-            ):
+            if field_name in wrapper_params:
+                continue
+
+            # For LLMChatBlock, add all non-wrapper fields
+            # For other blocks, only add fields they accept
+            if block_class == LLMChatBlock or field_name in block_class.model_fields:
                 field_value = getattr(self, field_name)
                 if field_value is not None:  # Only forward non-None values
                     params[field_name] = field_value
+        return params
+
+    def _extract_params(
+        self, kwargs: dict, block_class, remove_params: list[str] = []
+    ) -> dict:
+        """Extract parameters for specific block class based on its model_fields."""
+        wrapper_params = self._get_wrapper_params()
+
+        # For LLMChatBlock (with extra="allow"), forward all parameters except wrapper params
+        if block_class == LLMChatBlock:
+            params = {k: v for k, v in kwargs.items() if k not in wrapper_params}
+            params = self._add_composite_fields(params, block_class, wrapper_params)
+            params = {k: v for k, v in params.items() if k not in remove_params}
+        else:
+            # For other blocks, only forward parameters they accept
+            params = {
+                k: v
+                for k, v in kwargs.items()
+                if k in block_class.model_fields and k not in wrapper_params
+            }
+            params = self._add_composite_fields(params, block_class, wrapper_params)
 
         return params
 
@@ -179,9 +187,14 @@ class VerifyQuestionBlock(BaseBlock):
         """Create internal blocks with parameter routing."""
         # Route parameters to appropriate blocks
         prompt_params = self._extract_params(kwargs, PromptBuilderBlock)
-        llm_params = self._extract_params(kwargs, LLMChatBlock)
         parser_params = self._extract_params(kwargs, TextParserBlock)
         filter_params = self._extract_params(kwargs, ColumnValueFilterBlock)
+        remove_params = (
+            set(prompt_params.keys())
+            | set(parser_params.keys())
+            | set(filter_params.keys())
+        )
+        llm_params = self._extract_params(kwargs, LLMChatBlock, remove_params)
 
         self.prompt_builder = PromptBuilderBlock(
             block_name=f"{self.block_name}_prompt_builder",
@@ -190,23 +203,13 @@ class VerifyQuestionBlock(BaseBlock):
             **prompt_params,
         )
 
-        # Create LLM chat block with dynamic LLM parameter forwarding
-        llm_config = {
-            "block_name": f"{self.block_name}_llm_chat",
-            "input_cols": ["verify_question_prompt"],
-            "output_cols": ["raw_verify_question"],
+        # Create LLM chat block with parameter forwarding
+        self.llm_chat = LLMChatBlock(
+            block_name=f"{self.block_name}_llm_chat",
+            input_cols=["verify_question_prompt"],
+            output_cols=["raw_verify_question"],
             **llm_params,
-        }
-
-        # Only add LLM parameters if they are provided
-        if self.model is not None:
-            llm_config["model"] = self.model
-        if self.api_base is not None:
-            llm_config["api_base"] = self.api_base
-        if self.api_key is not None:
-            llm_config["api_key"] = self.api_key
-
-        self.llm_chat = LLMChatBlock(**llm_config)
+        )
 
         # Create text parser
         self.text_parser = TextParserBlock(
@@ -251,11 +254,27 @@ class VerifyQuestionBlock(BaseBlock):
         )
 
         try:
+            prompt_params = {
+                k: v for k, v in kwargs.items() if k in self.prompt_builder.model_fields
+            }
+            parser_params = {
+                k: v for k, v in kwargs.items() if k in self.text_parser.model_fields
+            }
+            filter_params = {
+                k: v for k, v in kwargs.items() if k in self.filter_block.model_fields
+            }
+            non_llm_params = (
+                set(prompt_params.keys())
+                | set(parser_params.keys())
+                | set(filter_params.keys())
+            )
+            llm_params = {k: v for k, v in kwargs.items() if k not in non_llm_params}
+
             # Execute 4-block pipeline with validation delegation
-            result = self.prompt_builder(samples, **kwargs)
-            result = self.llm_chat(result, **kwargs)
-            result = self.text_parser(result, **kwargs)
-            result = self.filter_block(result, **kwargs)
+            result = self.prompt_builder(samples, **prompt_params)
+            result = self.llm_chat(result, **llm_params)
+            result = self.text_parser(result, **parser_params)
+            result = self.filter_block(result, **filter_params)
 
             logger.info(
                 f"Question verification completed: {len(samples)} → {len(result)} samples",
@@ -273,10 +292,15 @@ class VerifyQuestionBlock(BaseBlock):
 
     def __getattr__(self, name: str) -> Any:
         """Forward attribute access to appropriate internal block."""
-        # Check each internal block to see which one has this parameter
+        # Try LLMChatBlock first since it accepts any parameters via extra="allow"
+        if hasattr(self, "llm_chat") and self.llm_chat is not None:
+            # Always try LLMChatBlock first - it will return None for unset attributes
+            # due to extra="allow", which makes hasattr() work correctly
+            return getattr(self.llm_chat, name, None)
+
+        # Check other internal blocks for their specific model_fields
         for block_attr, block_class in [
             ("prompt_builder", PromptBuilderBlock),
-            ("llm_chat", LLMChatBlock),
             ("text_parser", TextParserBlock),
             ("filter_block", ColumnValueFilterBlock),
         ]:
@@ -284,6 +308,7 @@ class VerifyQuestionBlock(BaseBlock):
                 internal_block = getattr(self, block_attr)
                 if internal_block is not None:
                     return getattr(internal_block, name)
+
         raise AttributeError(
             f"'{self.__class__.__name__}' object has no attribute '{name}'"
         )
@@ -292,20 +317,32 @@ class VerifyQuestionBlock(BaseBlock):
         """Handle dynamic parameter updates from flow.set_model_config()."""
         super().__setattr__(name, value)
 
-        # Forward to appropriate internal blocks
+        # Skip forwarding for internal block attributes and wrapper-specific params
+        if name in {
+            "prompt_builder",
+            "llm_chat",
+            "text_parser",
+            "filter_block",
+            "block_name",
+            "input_cols",
+            "output_cols",
+        }:
+            return
+
+        # Forward to LLMChatBlock first since it accepts any parameters via extra="allow"
+        if hasattr(self, "llm_chat") and self.llm_chat is not None:
+            setattr(self.llm_chat, name, value)
+
+        # Forward to other internal blocks for their specific model_fields
         for block_attr, block_class in [
             ("prompt_builder", PromptBuilderBlock),
-            ("llm_chat", LLMChatBlock),
             ("text_parser", TextParserBlock),
             ("filter_block", ColumnValueFilterBlock),
         ]:
             if hasattr(self, block_attr) and name in block_class.model_fields:
-                setattr(getattr(self, block_attr), name, value)
-
-    def _reinitialize_client_manager(self) -> None:
-        """Reinitialize internal LLM block's client manager."""
-        if hasattr(self.llm_chat, "_reinitialize_client_manager"):
-            self.llm_chat._reinitialize_client_manager()
+                internal_block = getattr(self, block_attr)
+                if internal_block is not None:
+                    setattr(internal_block, name, value)
 
     def get_internal_blocks_info(self) -> dict[str, Any]:
         """Get information about internal blocks."""
