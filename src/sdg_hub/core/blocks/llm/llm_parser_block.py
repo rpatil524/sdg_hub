@@ -7,16 +7,14 @@ This module provides the LLMParserBlock for extracting specific fields
 
 # Standard
 from typing import Any
-from weakref import finalize
-import json
+
+from pydantic import Field, model_validator
 
 # Third Party
-from datasets import Dataset, load_dataset
-from pydantic import Field, model_validator
+import pandas as pd
 
 # Local
 from ...utils.logger_config import setup_logger
-from ...utils.temp_manager import cleanup_path, create_temp_dir, create_temp_file
 from ..base import BaseBlock
 from ..registry import BlockRegistry
 
@@ -107,12 +105,12 @@ class LLMParserBlock(BaseBlock):
 
         return self
 
-    def _validate_custom(self, dataset: Dataset) -> None:
+    def _validate_custom(self, dataset: pd.DataFrame) -> None:
         """Validate LLMParserBlock specific requirements.
 
         Parameters
         ----------
-        dataset : Dataset
+        dataset : pd.DataFrame
             The dataset to validate.
 
         Raises
@@ -313,60 +311,16 @@ class LLMParserBlock(BaseBlock):
         extracted = self._extract_fields_from_response(raw_output)
         return [{**sample, **extracted}]
 
-    def generate(self, samples: Dataset, **kwargs: Any) -> Dataset:
+    def generate(self, samples: pd.DataFrame, **kwargs: Any) -> pd.DataFrame:
         logger.debug(f"Extracting fields from {len(samples)} samples")
         if len(samples) == 0:
             logger.warning("No samples to process, returning empty dataset")
-            return Dataset.from_list([])
+            return pd.DataFrame()
 
-        tmp_jsonl_path = kwargs.get("_flow_tmp_jsonl_path")
-        cleanup_locally = False
+        new_data = []
+        samples = samples.to_dict("records")  # Avoid Iterrows() when possible
 
-        if tmp_jsonl_path is None:
-            tmp_jsonl_path = str(
-                create_temp_file(
-                    prefix=f"{self.block_name}_llm_parser", suffix=".jsonl"
-                )
-            )
-            cleanup_locally = True
+        for sample in samples:
+            new_data.extend(self._generate(sample))
 
-        rows_written = 0
-        batch = []
-        with open(tmp_jsonl_path, "w") as f:
-            for sample in samples:
-                out = self._generate(sample)
-                for row in out:
-                    batch.append(json.dumps(row) + "\n")
-                    rows_written += 1
-                    if len(batch) >= 5:
-                        f.writelines(batch)
-                        batch.clear()
-            if batch:
-                f.writelines(batch)
-
-        if rows_written == 0:
-            if cleanup_locally:
-                cleanup_path(tmp_jsonl_path)
-            return Dataset.from_list([])
-
-        hf_cache_dir = None
-        try:
-            hf_cache_dir = create_temp_dir(
-                prefix=f"{self.block_name}_llm_parser_hf_cache"
-            )
-            ret = load_dataset(
-                "json",
-                data_files=tmp_jsonl_path,
-                split="train",
-                keep_in_memory=False,
-                cache_dir=str(hf_cache_dir),
-            )
-            finalize(ret, cleanup_path, hf_cache_dir)
-            return ret
-        except Exception:
-            if hf_cache_dir is not None:
-                cleanup_path(hf_cache_dir)
-            raise
-        finally:
-            if cleanup_locally:
-                cleanup_path(tmp_jsonl_path)
+        return pd.DataFrame(new_data)
