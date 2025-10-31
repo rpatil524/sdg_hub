@@ -20,7 +20,6 @@ import yaml
 
 # First Party
 from sdg_hub.core.utils.datautils import safe_concatenate_datasets
-import sdg_hub
 
 
 def setup_logger(name):
@@ -340,7 +339,7 @@ def build_raft_dataset(ds: Dataset, p, num_doc_in_context=4):
     return ds
 
 
-def create_knowledge_regular_ds(generated_dataset: Dataset):
+def create_knowledge_regular_ds(generated_dataset: Dataset) -> Dataset | None:
     """
     Create a knowledge dataset for the Skills Phase of knowledge tuning.
 
@@ -349,13 +348,11 @@ def create_knowledge_regular_ds(generated_dataset: Dataset):
 
     Parameters
     ----------
-    generated_dataset : Dataset
-        The input dataset containing generated knowledge content
+    generated_dataset (Dataset): The input dataset containing generated knowledge content
 
     Returns
     -------
-    Dataset
-        Processed dataset ready for skills phase training
+    Dataset | None: Processed dataset ready for skills phase training, or None if concatenation fails.
     """
     knowledge_ds = generate_knowledge_qa_dataset(
         generated_dataset, keep_context_separate=True
@@ -364,15 +361,15 @@ def create_knowledge_regular_ds(generated_dataset: Dataset):
 
     summarization_task_dataset = create_summarization_task_dataset(generated_dataset)
     if summarization_task_dataset is not None:
-        knowledge_ds = safe_concatenate_datasets(
-            [knowledge_ds, summarization_task_dataset]
-        )
+        datasets = [knowledge_ds, summarization_task_dataset]
+        df = safe_concatenate_datasets([ds.to_pandas() for ds in datasets])
+        knowledge_ds = Dataset.from_pandas(df) if df is not None else None
     return knowledge_ds
 
 
 def create_knowledge_pretraining_ds(
     generated_dataset: Dataset, add_auxiliary_dataset: bool = True
-):
+) -> Dataset | None:
     # Phase 0.7 (Knowledge Phase)
     """
     Create a knowledge dataset for the Knowledge Phase of knowledge tuning.
@@ -387,7 +384,7 @@ def create_knowledge_pretraining_ds(
 
     Returns
     -------
-    Dataset: The generated knowledge dataset.
+    Dataset | None: The generated knowledge dataset, or None if concatenation fails.
     """
     knowledge_ds = generate_knowledge_qa_dataset(
         generated_dataset, keep_context_separate=False
@@ -397,9 +394,9 @@ def create_knowledge_pretraining_ds(
     summarization_task_dataset = create_summarization_task_dataset(generated_dataset)
     if summarization_task_dataset is not None and add_auxiliary_dataset:
         summarization_task_dataset = summarization_task_dataset.map(_conv_pretrain)
-        knowledge_ds = safe_concatenate_datasets(
-            [knowledge_ds, summarization_task_dataset]
-        )
+        datasets = [knowledge_ds, summarization_task_dataset]
+        df = safe_concatenate_datasets([ds.to_pandas() for ds in datasets])
+        knowledge_ds = Dataset.from_pandas(df) if df is not None else None
     return knowledge_ds
 
 
@@ -758,7 +755,10 @@ class DocProcessor:
                     }
                 )
             )
-        chunked_document_all_icl = safe_concatenate_datasets(chunked_document_all_icl)
+        df = safe_concatenate_datasets([ds.to_pandas() for ds in chunked_document_all_icl])
+        if df is None:
+            raise ValueError("No seed_examples found in user config. At least one seed example is required.")
+        chunked_document_all_icl = Dataset.from_pandas(df)
         chunked_document_all_icl = chunked_document_all_icl.map(
             lambda x: {
                 "chunks": chunk_document(
@@ -781,20 +781,21 @@ class DocProcessor:
         )
         return new_ds
 
-    def get_processed_dataset(self) -> Dataset:
+    def get_processed_dataset(self) -> Dataset | None:
         """
         Process all the parsed docling json files and return a dataset.
 
         Returns
         -------
-            Dataset: Dataset object.
+            Dataset | None: Dataset object, or None if concatenation fails.
         """
         datasets = []
         for json_fp in self.docling_jsons:
             chunk_ds = self._process_parsed_docling_json(json_fp)
             chunk_ds_with_icls = self._add_icls(chunk_ds)
             datasets.append(chunk_ds_with_icls)
-        return safe_concatenate_datasets(datasets)
+        df = safe_concatenate_datasets([ds.to_pandas() for ds in datasets])
+        return Dataset.from_pandas(df) if df is not None else None
 
     def get_processed_markdown_dataset(self, list_md_files: list[Path]) -> Dataset:
         chunks_mds = []
