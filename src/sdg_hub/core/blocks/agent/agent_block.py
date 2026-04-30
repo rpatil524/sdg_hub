@@ -6,6 +6,12 @@ import asyncio
 import json
 import uuid
 
+from mlflow.types.agent import (
+    ChatAgentMessage,
+    ChatAgentRequest,
+    ChatContext,
+)
+from mlflow.types.chat import Function, ToolCall
 from pydantic import Field, PrivateAttr, ValidationError
 from tqdm import tqdm
 import pandas as pd
@@ -224,7 +230,7 @@ class AgentBlock(BaseBlock):
         else:
             return "agent_response"
 
-    def _build_messages(self, content: Any) -> list[dict[str, Any]]:
+    def _build_messages(self, content: Any) -> list[ChatAgentMessage]:
         """Build message list from row content.
 
         Parameters
@@ -234,18 +240,51 @@ class AgentBlock(BaseBlock):
 
         Returns
         -------
-        list[dict]
-            List of messages in standard format.
+        list[ChatAgentMessage]
+            List of ChatAgentMessage objects.
         """
         if isinstance(content, list):
-            # Already a message list
-            return content
+            result = []
+            for item in content:
+                if isinstance(item, ChatAgentMessage):
+                    result.append(item)
+                elif isinstance(item, dict):
+                    kwargs: dict[str, Any] = {
+                        "role": item.get("role", "user"),
+                        "content": item.get("content", ""),
+                    }
+                    if item.get("name"):
+                        kwargs["name"] = item["name"]
+                    if item.get("tool_call_id"):
+                        kwargs["tool_call_id"] = item["tool_call_id"]
+                    if item.get("tool_calls"):
+                        tool_calls = []
+                        for tc in item["tool_calls"]:
+                            args = tc.get("function", {}).get("arguments", "{}")
+                            if not isinstance(args, str):
+                                args = json.dumps(args)
+                            tool_calls.append(
+                                ToolCall(
+                                    id=tc.get("id", str(uuid.uuid4())),
+                                    type=tc.get("type", "function"),
+                                    function=Function(
+                                        name=tc.get("function", {}).get("name", ""),
+                                        arguments=args,
+                                    ),
+                                )
+                            )
+                        kwargs["tool_calls"] = tool_calls
+                    result.append(ChatAgentMessage(**kwargs))
+                else:
+                    result.append(ChatAgentMessage(role="user", content=str(item)))
+            return result
         elif isinstance(content, dict):
-            # Single message dict
+            return self._build_messages([content])
+        elif isinstance(content, ChatAgentMessage):
             return [content]
         else:
             # Plain text - wrap as user message
-            return [{"role": "user", "content": str(content)}]
+            return [ChatAgentMessage(role="user", content=str(content))]
 
     def _get_session_id(self, row: pd.Series, idx: int) -> str:
         """Get session ID for a row.
@@ -289,11 +328,16 @@ class AgentBlock(BaseBlock):
         Returns
         -------
         dict
-            Response from the agent.
+            Response from the agent as model_dump() dict.
         """
         messages = self._build_messages(row[messages_col])
         session_id = self._get_session_id(row, idx)
-        return connector.send(messages, session_id)
+        request = ChatAgentRequest(
+            messages=messages,
+            context=ChatContext(conversation_id=session_id),
+        )
+        response = connector.send(request)
+        return response.model_dump()
 
     async def _process_row_async(
         self,
@@ -326,8 +370,12 @@ class AgentBlock(BaseBlock):
         async with semaphore:
             messages = self._build_messages(row[messages_col])
             session_id = self._get_session_id(row, idx)
-            response = await connector.asend(messages, session_id)
-            return idx, response
+            request = ChatAgentRequest(
+                messages=messages,
+                context=ChatContext(conversation_id=session_id),
+            )
+            response = await connector.asend(request)
+            return idx, response.model_dump()
 
     async def _process_batch_async(
         self,
