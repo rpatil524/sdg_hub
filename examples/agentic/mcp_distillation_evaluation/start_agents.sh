@@ -87,18 +87,6 @@ MCP_SERVER_NAME = os.environ.get("MCP_SERVER_NAME", "mcp-server")
 MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "http://localhost:8001/mcp")
 DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "gpt-5.2")
 
-def _get_model(state, config):
-    """Return the LLM, using configurable.model if provided at runtime."""
-    model_name = config.get("configurable", {}).get("model", DEFAULT_MODEL)
-    api_base = config.get("configurable", {}).get("api_base", None)
-    api_key = config.get("configurable", {}).get("api_key", None)
-    kwargs = {"model": model_name}
-    if api_base:
-        kwargs["base_url"] = api_base
-    if api_key:
-        kwargs["api_key"] = api_key
-    return ChatOpenAI(**kwargs)
-
 def _create_graph():
     client = MultiServerMCPClient({
         MCP_SERVER_NAME: {"transport": "streamable_http", "url": MCP_SERVER_URL},
@@ -107,7 +95,28 @@ def _create_graph():
     for tool in tools:
         tool.handle_tool_error = True
     print(f"[{MCP_SERVER_NAME}] Loaded {len(tools)} tools from {MCP_SERVER_URL}")
-    return create_react_agent(_get_model, tools)
+
+    def _get_model(state, config):
+        """Return the LLM with tools bound.
+
+        langgraph >=1.1 requires callable models to bind their own tools.
+        """
+        configurable = config.get("configurable", {}) if isinstance(config, dict) else getattr(config, "configurable", {}) or {}
+        model_name = configurable.get("model", DEFAULT_MODEL) if isinstance(configurable, dict) else getattr(configurable, "model", DEFAULT_MODEL)
+        api_base = configurable.get("api_base", None) if isinstance(configurable, dict) else getattr(configurable, "api_base", None)
+        api_key = configurable.get("api_key", None) if isinstance(configurable, dict) else getattr(configurable, "api_key", None)
+        kwargs = {"model": model_name}
+        if api_base:
+            kwargs["base_url"] = api_base
+        if api_key:
+            kwargs["api_key"] = api_key
+        return ChatOpenAI(**kwargs).bind_tools(tools)
+
+    return create_react_agent(
+        _get_model,
+        tools,
+        prompt="You MUST use the available tools to answer every question. Never answer from your own knowledge. Always call at least one tool before responding.",
+    )
 
 graph = _create_graph()
 PYEOF

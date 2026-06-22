@@ -23,6 +23,9 @@ MCP_SERVERS_DIR="${MCP_BENCH_DIR:-$SCRIPT_DIR/../../mcp-bench}/mcp_servers"
 PROJECT_ROOT="$SCRIPT_DIR/../../.."
 VENV_PYTHON="$PROJECT_ROOT/.venv/bin/python"
 
+# Use uv for installs (the project uses uv-managed venvs which don't bundle pip)
+UV_PIP="uv pip install --python $VENV_PYTHON"
+
 if [[ ! -d "$MCP_SERVERS_DIR" ]]; then
     echo "ERROR: mcp-bench not found at $MCP_SERVERS_DIR"
     echo "Clone it: git clone https://github.com/Accenture/mcp-bench.git $(dirname "$MCP_SERVERS_DIR")"
@@ -36,11 +39,11 @@ fi
 # instance and runs it with streamable-http transport on the given port.
 # The literal PORT is replaced with the actual port number at launch time.
 SERVERS=(
-    "weather-data|8001|weather_mcp|from server import mcp; mcp.settings.host='0.0.0.0'; mcp.settings.port=PORT; mcp.run(transport='streamable-http')|$VENV_PYTHON -m pip install -r requirements.txt -q|Weather Data"
-    "medical-calculator|8002|medcalc|from medcalc.__main__ import mcp; mcp.settings.host='0.0.0.0'; mcp.settings.port=PORT; mcp.run(transport='streamable-http')|$VENV_PYTHON -m pip install -e . -q|Medical Calculator"
-    "wikipedia|8003|wikipedia-mcp|from wikipedia_mcp.server import create_server; s=create_server(); s.settings.host='0.0.0.0'; s.settings.port=PORT; s.run(transport='streamable-http')|$VENV_PYTHON -m pip install -r requirements.txt -q|Wikipedia"
-    "car-price|8004|car-price-mcp-main|from server import mcp; mcp.settings.host='0.0.0.0'; mcp.settings.port=PORT; mcp.run(transport='streamable-http')|$VENV_PYTHON -m pip install -r requirements.txt -q|Car Price Evaluator"
-    "reddit|8005|mcp-reddit|from mcp_reddit.reddit_fetcher import mcp; mcp.settings.host='0.0.0.0'; mcp.settings.port=PORT; mcp.run(transport='streamable-http')|$VENV_PYTHON -m pip install -e . -q|Reddit"
+    "weather-data|8001|weather_mcp|from server import mcp; mcp.settings.host='0.0.0.0'; mcp.settings.port=PORT; mcp.run(transport='streamable-http')|$UV_PIP -r requirements.txt -q|Weather Data"
+    "medical-calculator|8002|medcalc|from medcalc.__main__ import mcp; mcp.settings.host='0.0.0.0'; mcp.settings.port=PORT; mcp.run(transport='streamable-http')|$UV_PIP -e . -q|Medical Calculator"
+    "wikipedia|8003|wikipedia-mcp|from wikipedia_mcp.server import create_server; s=create_server(); s.run(transport='streamable-http', host='0.0.0.0', port=PORT)|$UV_PIP -r requirements.txt -q|Wikipedia"
+    "car-price|8004|car-price-mcp-main|from server import mcp; mcp.settings.host='0.0.0.0'; mcp.settings.port=PORT; mcp.run(transport='streamable-http')|$UV_PIP -r requirements.txt -q|Car Price Evaluator"
+    "reddit|8005|mcp-reddit|from mcp_reddit.reddit_fetcher import mcp; mcp.run(transport='streamable-http', host='0.0.0.0', port=PORT)|$UV_PIP -e . -q|Reddit"
     "dex-paprika|8006|dexpaprika-mcp|NODE|npm install -q|DEX Paprika"
 )
 
@@ -83,14 +86,26 @@ if [[ "${1:-}" == "--stop" ]]; then
 fi
 
 # ── Install + Start ──────────────────────────────────────────────────
-echo "Installing dependencies..."
+echo "Installing shared dependencies..."
+$UV_PIP fastmcp -q 2>&1 | tail -1
+
+echo "Installing per-server dependencies..."
+install_failures=0
 for entry in "${SERVERS[@]}"; do
     IFS='|' read -r name port cwd cmd install display_name <<< "$entry"
     server_dir="$MCP_SERVERS_DIR/$cwd"
     [[ ! -d "$server_dir" ]] && continue
     echo "  ${display_name:-$name}..."
-    (cd "$server_dir" && eval "$install") 2>&1 | tail -1 || true
+    if ! (cd "$server_dir" && eval "$install") 2>&1; then
+        echo "    WARNING: install failed for ${display_name:-$name}"
+        install_failures=$((install_failures + 1))
+    fi
 done
+
+if [[ $install_failures -gt 0 ]]; then
+    echo ""
+    echo "WARNING: $install_failures server(s) had install failures (see above)"
+fi
 
 echo ""
 echo "Starting servers..."
